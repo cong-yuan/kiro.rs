@@ -135,12 +135,12 @@ export function IdcLoginDialog({ open, onOpenChange, onSuccess, mode = 'builder-
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            {isEnterprise ? 'Enterprise IAM Identity Center SSO 登录' : 'AWS SSO / Builder ID 登录'}
+            {isEnterprise ? 'Kiro 企业 SSO 登录' : 'Kiro 登录（AWS Builder ID）'}
           </DialogTitle>
           <DialogDescription>
             {isEnterprise
-              ? '填写组织的 SSO Start URL 与区域，通过设备授权流程添加企业凭据。'
-              : '通过 AWS Identity Center 设备授权流程添加凭据，无需手动导出 refreshToken。'}
+              ? '填写组织的 SSO Start URL 与区域，通过 Kiro 设备授权流程添加企业凭据。'
+              : '通过 Kiro 的 AWS Builder ID 设备授权流程添加凭据，无需手动导出 refreshToken。'}
           </DialogDescription>
         </DialogHeader>
 
@@ -239,7 +239,7 @@ export function IdcLoginDialog({ open, onOpenChange, onSuccess, mode = 'builder-
                 </>
               ) : (
                 <>
-                  <p className="text-sm text-muted-foreground">在浏览器中访问以下地址并输入验证码</p>
+                  <p className="text-sm text-muted-foreground">打开 Kiro 登录链接并输入验证码</p>
                   <div className="flex flex-wrap items-center justify-center gap-2">
                     <a
                       href={session.verificationUriComplete ?? session.verificationUri}
