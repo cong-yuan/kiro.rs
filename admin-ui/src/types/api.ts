@@ -492,6 +492,8 @@ export interface ClientKeysResponse {
 
 export interface CreateClientKeyRequest {
   name: string
+  /** 指定明文 Key；留空时由服务端自动生成 */
+  key?: string
   description?: string
   group?: string
   /** 积分使用上限（可选，不传表示不限制） */

@@ -960,6 +960,9 @@ pub struct ClientKeysResponse {
 #[serde(rename_all = "camelCase")]
 pub struct CreateClientKeyRequest {
     pub name: String,
+    /// 可选的指定明文；留空时由服务端自动生成。
+    #[serde(default)]
+    pub key: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]

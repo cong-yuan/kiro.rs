@@ -22,16 +22,13 @@ use super::{
         AddCredentialRequest, AddProxyRequest, AssignProxyRequest, AssignRoundRobinRequest,
         BatchAddProxyRequest, BatchImportEvent, BatchImportRequest, BatchImportSummary,
         ClientKeyItem, ClientKeysResponse, CompleteSocialLoginRequest, CreateClientKeyRequest,
-        CreateClientKeyResponse, CredentialTestRequest, ModelTestRequest,
-        CredentialMetadataSchemaConfig,
-        SetAccountRpmLimitConfigRequest, SetAccountThrottleConfigRequest, SetDisabledRequest,
-        SetGlobalProxyRequest,
+        CreateClientKeyResponse, CredentialMetadataSchemaConfig, CredentialTestRequest,
+        ModelTestRequest, SetAccountRpmLimitConfigRequest, SetAccountThrottleConfigRequest,
+        SetCustomModelsRequest, SetDisabledRequest, SetGlobalProxyRequest,
         SetLoadBalancingModeRequest, SetLogGovernanceConfigRequest, SetPriorityRequest,
-        SetSelfHealConfigRequest,
-        SetUpdateConfigRequest, StartIdcLoginRequest, StartSocialLoginRequest, SuccessResponse,
-        UpdateAdminKeyRequest, UpdateClientKeyRequest, UpdateCredentialRequest,
-        UpdateRefreshTokenRequest,
-        SetCustomModelsRequest,
+        SetSelfHealConfigRequest, SetUpdateConfigRequest, StartIdcLoginRequest,
+        StartSocialLoginRequest, SuccessResponse, UpdateAdminKeyRequest, UpdateClientKeyRequest,
+        UpdateCredentialRequest, UpdateRefreshTokenRequest,
     },
     usage_stats::{Range, StatsGranularity, StatsQueryWindow},
 };
@@ -47,9 +44,7 @@ pub async fn get_all_credentials(State(state): State<AdminState>) -> impl IntoRe
 }
 
 /// GET /api/admin/config/credential-metadata-schema
-pub async fn get_credential_metadata_schema(
-    State(state): State<AdminState>,
-) -> impl IntoResponse {
+pub async fn get_credential_metadata_schema(State(state): State<AdminState>) -> impl IntoResponse {
     Json(state.service.get_credential_metadata_schema())
 }
 
@@ -366,7 +361,7 @@ pub async fn delete_credential(
     State(state): State<AdminState>,
     Path(id): Path<u64>,
 ) -> impl IntoResponse {
-    match state.service.delete_credential(id) {
+    match state.service.delete_credential(id).await {
         Ok(_) => Json(SuccessResponse::new(format!("凭据 #{} 已删除", id))).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
@@ -737,10 +732,11 @@ pub async fn set_global_proxy(
     State(state): State<AdminState>,
     Json(payload): Json<SetGlobalProxyRequest>,
 ) -> impl IntoResponse {
-    match state
-        .service
-        .set_global_proxy(payload.proxy_url, payload.proxy_username, payload.proxy_password)
-    {
+    match state.service.set_global_proxy(
+        payload.proxy_url,
+        payload.proxy_username,
+        payload.proxy_password,
+    ) {
         Ok(_) => Json(SuccessResponse::new("全局代理已更新")).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
     }
@@ -993,17 +989,51 @@ pub async fn create_client_key(
                 .into_response();
         }
     }
-    let entry = state.client_keys.create(
-        name.to_string(),
-        payload
-            .description
-            .map(|d| d.trim().to_string())
-            .filter(|d| !d.is_empty()),
-        payload
-            .group
-            .map(|g| g.trim().to_string())
-            .filter(|g| !g.is_empty()),
-    );
+    let custom_key = payload
+        .key
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty());
+    if let Some(key) = custom_key.as_deref()
+        && (!(8..=256).contains(&key.len()) || !key.bytes().all(|byte| byte.is_ascii_graphic()))
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(super::types::AdminErrorResponse::invalid_request(
+                "key 必须为 8–256 位可见 ASCII 字符",
+            )),
+        )
+            .into_response();
+    }
+    let description = payload
+        .description
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+    let group = payload
+        .group
+        .map(|g| g.trim().to_string())
+        .filter(|g| !g.is_empty());
+    let entry = match custom_key {
+        Some(key) => {
+            match state
+                .client_keys
+                .create_with_key(name.to_string(), description, group, key)
+            {
+                Ok(entry) => entry,
+                Err(super::client_keys::CreateClientKeyError::AlreadyExists) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(super::types::AdminErrorResponse::invalid_request(
+                            "指定的 key 已存在",
+                        )),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        None => state
+            .client_keys
+            .create(name.to_string(), description, group),
+    };
     // 创建后若指定了上限则应用
     if let Some(v) = payload.max_credits {
         state.client_keys.set_max_credits(entry.id, Some(v));
@@ -1415,7 +1445,9 @@ pub async fn stats_by_key(
     };
     let group = parse_group_filter(&params);
     let cred_ids = group_to_cred_ids(&state, group.as_deref());
-    let data = state.usage_aggregator.query_by_key(window, cred_ids.as_ref());
+    let data = state
+        .usage_aggregator
+        .query_by_key(window, cred_ids.as_ref());
     // Key 名称解析：命中客户端 Key 名称表则取名称，否则回退 #id
     let key_name_map: HashMap<u64, String> = state
         .client_keys
@@ -1504,7 +1536,7 @@ pub async fn list_traces(
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(0),
     };
-    let (records, total) = state.trace_store.query_paged(&query);
+    let (records, total) = state.trace_store.query_paged(&query).await;
 
     // 附加 credential email 方便前端展示（与 stats_by_credential 一致）
     let snapshot = state.service.get_all_credentials();
@@ -1585,7 +1617,7 @@ pub async fn list_traces(
 /// 按凭据聚合失败次数（鉴权 / 账号风控 / 其他三类），用于卡片分色展示。
 /// 返回 { "<credentialId>": { auth, throttle, other }, ... }
 pub async fn trace_failure_stats(State(state): State<AdminState>) -> impl IntoResponse {
-    let stats = state.trace_store.failure_stats();
+    let stats = state.trace_store.failure_stats().await;
     let map: std::collections::HashMap<String, serde_json::Value> = stats
         .into_iter()
         .map(|(id, s)| {

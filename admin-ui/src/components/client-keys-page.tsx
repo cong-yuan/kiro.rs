@@ -89,6 +89,7 @@ export function ClientKeysPage() {
 
   const [createOpen, setCreateOpen] = useState(false)
   const [createName, setCreateName] = useState('')
+  const [createPlainKey, setCreatePlainKey] = useState('')
   const [createDesc, setCreateDesc] = useState('')
   const [createGroup, setCreateGroup] = useState('')
   const [createMaxCredits, setCreateMaxCredits] = useState('')
@@ -114,9 +115,15 @@ export function ClientKeysPage() {
       toast.error('积分上限必须是非负数')
       return
     }
+    const key = createPlainKey.trim()
+    if (key && !/^[\x21-\x7E]{8,256}$/.test(key)) {
+      toast.error('指定 Key 必须为 8–256 位可见 ASCII 字符')
+      return
+    }
     try {
       const res = await createKey.mutateAsync({
         name,
+        key: key || undefined,
         description: createDesc.trim() || undefined,
         group: createGroup.trim() || undefined,
         maxCredits: maxCredits ?? undefined,
@@ -124,6 +131,7 @@ export function ClientKeysPage() {
       setCreatedKey(res)
       setCreateOpen(false)
       setCreateName('')
+      setCreatePlainKey('')
       setCreateDesc('')
       setCreateGroup('')
       setCreateMaxCredits('')
@@ -428,6 +436,22 @@ export function ClientKeysPage() {
                 disabled={createKey.isPending}
                 autoFocus
               />
+            </div>
+            <div>
+              <label className="text-[12px] text-muted-foreground">指定 Key（可选）</label>
+              <Input
+                type="text"
+                autoComplete="off"
+                spellCheck={false}
+                className="font-mono"
+                placeholder="留空则自动生成 sk-..."
+                value={createPlainKey}
+                onChange={(e) => setCreatePlainKey(e.target.value)}
+                disabled={createKey.isPending}
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                可指定 8–256 位可见 ASCII 字符，不要求 sk- 前缀；不能与已有 Key 重复。
+              </p>
             </div>
             <div>
               <label className="text-[12px] text-muted-foreground">描述（可选）</label>

@@ -372,8 +372,9 @@ Admin API 鉴权同样支持：
 | `selfHealMaxConsecutiveRounds` | `5` | 连续自愈且无成功的最大轮数（`0`=不限），超限即停并提示人工介入 |
 | `modelCacheTtlSecs` | `3600` | 每个凭据的上游可用模型缓存 TTL（秒） |
 | `extractThinking` | `true` | 非流式响应是否把旧 `<thinking>` 文本提取成 thinking block |
-| `traceEnabled` | `true` | 是否写入 `traces.db` |
+| `traceEnabled` | `true` | 是否写入请求链路追踪记录 |
 | `traceRetentionDays` | `7` | trace 保留天数 |
+| `traceDatabaseUrl` | 无 | Trace PostgreSQL URL；省略时使用本地 SQLite `traces.db` |
 | `usageLogRetentionDays` | `31` | `usage_log.*.jsonl` 保留天数 |
 | `countTokensApiUrl` | 无 | 外部 count_tokens API 地址 |
 | `countTokensApiKey` | 无 | 外部 count_tokens API Key |
@@ -383,6 +384,18 @@ Admin API 鉴权同样支持：
 | `updateAutoApplyTime` | `03:00` | 自动更新时间，本地时区 `HH:MM` |
 
 非空的 `config.apiKey` 每次启动都会同步为不可删除、可轮换的系统 Key `id=0`。手动修改配置后，旧系统 Key 立即失效，新值自动启用；已有名称、描述、分组和累计统计会保留。Admin 面板新建或轮换的客户端 Key 统一以 `sk-` 开头，但请求鉴权不会对任何已存储 Key 强制检查前缀。`adminApiKey` 独立用于 Admin UI / Admin API 登录，不参与 `/v1` 业务流量鉴权。
+
+### PostgreSQL 请求日志
+
+默认不需要数据库服务，请求日志继续写入 `credentials.json` 同目录的 `traces.db`。若需要多实例共享请求日志，可设置：
+
+```json
+{
+  "traceDatabaseUrl": "postgresql://kiro:password@postgres:5432/kiro"
+}
+```
+
+启动时会自动创建 `traces`、`trace_attempts` 及索引。仅请求链路追踪会切换到 PostgreSQL；`credentials.json`、`client_api_keys.json`、用量 JSONL、余额与缓存文件仍保存在本地。显式配置 PostgreSQL 后若连接或建表失败，服务会禁用 Trace 并继续提供模型 API，不会静默回退到 SQLite。数据库账号需要目标 schema 的建表、索引、读写和删除权限。
 
 <a id="credentials"></a>
 ## 🔐 凭据
@@ -697,7 +710,7 @@ data/
 - `kiro_balance_cache.json`：凭据订阅、额度、邮箱等缓存。
 - `proxy_pool.json`：代理池与健康状态。
 - `cache_metering.json`：prompt cache 计量缓存，定期落盘。
-- `traces.db`：SQLite 请求链路追踪数据库，WAL 模式。
+- `traces.db`：默认的 SQLite 请求链路追踪数据库，WAL 模式；配置 `traceDatabaseUrl` 后不再使用它记录新 Trace。
 - `usage_log.*.jsonl`：按日滚动请求用量日志。
 
 `CacheMeter` 会基于 `cache_control` 和会话信息模拟 Anthropic prompt cache 口径，输出互斥的：
@@ -715,7 +728,7 @@ data/
 - 概览：整体请求量、token、模型分布、凭据贡献。
 - 凭据管理：添加、登录、重登、删除、禁用、优先级、余额、模型列表、超额开关、代理绑定。
 - 客户端 Key：创建、编辑、禁用、轮换、删除、分组绑定和重置统计；系统 Key 不可删除但可轮换。
-- 请求日志：查询 `traces.db`，查看失败原因、状态码、凭据尝试链路和 token 用量。
+- 请求日志：查询当前 Trace 后端（SQLite / PostgreSQL），查看失败原因、状态码、凭据尝试链路和 token 用量。
 
 Admin 还提供：
 

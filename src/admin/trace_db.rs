@@ -4,8 +4,9 @@
 //! - 一个外部请求 = 1 条 [`TraceRecord`] 汇总 + N 条 [`TraceAttempt`] 子记录
 //! - 每跳记录命中凭据、HTTP 状态码、失败分类、上游错误体片段、耗时
 //!
-//! 存储：SQLite（`traces.db`），WAL 模式。前端查询直接走 SQL（索引 + WHERE + LIMIT），
-//! 不维护内存缓冲。后台任务定期清理超过保留天数的记录（保留天数与启用开关运行时可改）。
+//! 存储：默认 SQLite（`traces.db`，WAL），也可通过 `traceDatabaseUrl` 使用 PostgreSQL。
+//! 前端查询直接走数据库（索引 + WHERE + LIMIT），不维护内存缓冲。后台任务定期清理
+//! 超过保留天数的记录（保留天数与启用开关运行时可改）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,6 +16,8 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use rusqlite::{Connection, types::Type};
 use serde::{Deserialize, Serialize};
+
+use super::trace_postgres::PostgresTraceStore;
 
 /// trace 记录默认保留天数
 const DEFAULT_RETENTION_DAYS: u64 = 7;
@@ -199,9 +202,14 @@ pub struct TraceQuery {
     pub offset: usize,
 }
 
-/// SQLite 持久化存储
+enum TraceBackend {
+    Sqlite(Mutex<Connection>),
+    Postgres(PostgresTraceStore),
+}
+
+/// SQLite / PostgreSQL 双后端 Trace 存储。
 pub struct TraceStore {
-    conn: Mutex<Connection>,
+    backend: TraceBackend,
     /// 是否启用 trace 写入（运行时可改）。false 时 insert 直接短路。
     enabled: AtomicBool,
     /// 记录保留天数（运行时可改），cleanup 时读取。
@@ -230,19 +238,44 @@ impl TraceStore {
         conn.execute_batch(SCHEMA)?;
         Self::migrate(&conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            backend: TraceBackend::Sqlite(Mutex::new(conn)),
             enabled: AtomicBool::new(enabled),
             retention_days: AtomicU64::new(retention_days.max(1) as u64),
         })
     }
 
-    /// 内存数据库（traces.db 打开失败时的兜底；进程退出即丢，但保证 Admin 查询不崩）
+    /// 按配置打开 SQLite 或 PostgreSQL Trace 后端。
+    pub async fn open_configured(
+        sqlite_path: PathBuf,
+        database_url: Option<&str>,
+        enabled: bool,
+        retention_days: u32,
+    ) -> anyhow::Result<Self> {
+        let url = database_url.map(str::trim).filter(|url| !url.is_empty());
+        match url {
+            None => Ok(Self::open(sqlite_path, enabled, retention_days)?),
+            Some(url) if url.starts_with("postgres://") || url.starts_with("postgresql://") => {
+                let store = PostgresTraceStore::connect(url).await?;
+                Ok(Self {
+                    backend: TraceBackend::Postgres(store),
+                    enabled: AtomicBool::new(enabled),
+                    retention_days: AtomicU64::new(retention_days.max(1) as u64),
+                })
+            }
+            Some(url) => anyhow::bail!(
+                "traceDatabaseUrl scheme 不支持（仅 postgres:// / postgresql://）: {}",
+                url.split(':').next().unwrap_or(url)
+            ),
+        }
+    }
+
+    /// 内存数据库（Trace 后端打开失败时的兜底；进程退出即丢，但保证 Admin 查询不崩）
     pub fn open_in_memory() -> rusqlite::Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
         Self::migrate(&conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            backend: TraceBackend::Sqlite(Mutex::new(conn)),
             enabled: AtomicBool::new(true),
             retention_days: AtomicU64::new(DEFAULT_RETENTION_DAYS),
         })
@@ -274,10 +307,7 @@ impl TraceStore {
         let key_source_added = !existing.contains("key_source");
         for (name, def) in columns {
             if !existing.contains(name) {
-                conn.execute_batch(&format!(
-                    "ALTER TABLE traces ADD COLUMN {} {};",
-                    name, def
-                ))?;
+                conn.execute_batch(&format!("ALTER TABLE traces ADD COLUMN {} {};", name, def))?;
             }
         }
         // 老库 key_source 列首次添加后，按 key_id 语义回填：master apiKey (key_id=0) 之外都视为客户端 Key。
@@ -311,13 +341,19 @@ impl TraceStore {
             .store(days.max(1) as u64, Ordering::Relaxed);
     }
 
-    /// 写入一条完整链路（traces + attempts 在一个事务里）。失败仅 warn，不阻塞请求。
-    /// trace 关闭时直接短路。
+    /// 写入一条完整链路。SQLite 同步提交；PostgreSQL 后台提交，不阻塞模型响应。
     pub fn insert(&self, rec: &TraceRecord) {
         if !self.is_enabled() {
             return;
         }
-        let mut conn = self.conn.lock();
+        match &self.backend {
+            TraceBackend::Sqlite(conn) => Self::insert_sqlite(conn, rec),
+            TraceBackend::Postgres(store) => store.spawn_insert(rec.clone()),
+        }
+    }
+
+    fn insert_sqlite(conn: &Mutex<Connection>, rec: &TraceRecord) {
+        let mut conn = conn.lock();
         let tx = match conn.transaction() {
             Ok(t) => t,
             Err(e) => {
@@ -390,22 +426,28 @@ impl TraceStore {
         }
     }
 
-    /// 分页查询：返回 (当前页记录, 符合条件的总数)。仅 warn 失败，返回 (空, 0)。
-    pub fn query_paged(&self, q: &TraceQuery) -> (Vec<TraceRecord>, usize) {
-        let conn = self.conn.lock();
-        match Self::query_inner(&conn, q) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!("trace 查询失败: {}", e);
-                (Vec::new(), 0)
+    /// 分页查询：返回 (当前页记录, 符合条件的总数)。
+    pub async fn query_paged(&self, q: &TraceQuery) -> (Vec<TraceRecord>, usize) {
+        let result = match &self.backend {
+            TraceBackend::Sqlite(conn) => {
+                let conn = conn.lock();
+                Self::query_inner(&conn, q).map_err(anyhow::Error::from)
             }
-        }
+            TraceBackend::Postgres(store) => store.query_paged(q).await,
+        };
+        result.unwrap_or_else(|error| {
+            tracing::warn!("trace 查询失败: {}", error);
+            (Vec::new(), 0)
+        })
     }
 
-    /// 测试辅助：仅取记录、忽略总数
+    /// SQLite 测试辅助：仅取记录、忽略总数。
     #[cfg(test)]
     fn query(&self, q: &TraceQuery) -> Vec<TraceRecord> {
-        self.query_paged(q).0
+        match &self.backend {
+            TraceBackend::Sqlite(conn) => Self::query_inner(&conn.lock(), q).unwrap_or_default().0,
+            TraceBackend::Postgres(_) => panic!("PostgreSQL 测试应使用异步查询"),
+        }
     }
 
     /// 把 [`TraceQuery`] 的过滤条件拼成 WHERE 子句 + 参数（值全部参数化绑定）
@@ -473,7 +515,12 @@ impl TraceStore {
         // 与其让用户先想清楚该填哪个字段，不如一个框同时匹配这三处。
         // LIKE 无法走索引，但已被上面的时间窗口把扫描范围收窄。
         if let Some(kw) = &q.keyword {
-            let pattern = format!("%{}%", kw.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+            let pattern = format!(
+                "%{}%",
+                kw.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            );
             clauses.push(
                 "(model LIKE ? ESCAPE '\\' OR trace_id LIKE ? ESCAPE '\\' \
                  OR IFNULL(error_message, '') LIKE ? ESCAPE '\\')"
@@ -564,11 +611,22 @@ impl TraceStore {
         Ok((records, total as usize))
     }
 
-    /// 删除超过保留期的记录（traces + 关联 attempts）。仅 warn 失败。
-    pub fn cleanup(&self) {
+    /// 删除超过保留期的记录（traces + 关联 attempts）。
+    pub async fn cleanup(&self) {
         let cutoff =
             (Utc::now() - chrono::Duration::days(self.retention_days() as i64)).timestamp();
-        let mut conn = self.conn.lock();
+        match &self.backend {
+            TraceBackend::Sqlite(conn) => Self::cleanup_sqlite(conn, cutoff),
+            TraceBackend::Postgres(store) => {
+                if let Err(error) = store.cleanup(cutoff).await {
+                    tracing::warn!("trace 清理失败: {}", error);
+                }
+            }
+        }
+    }
+
+    fn cleanup_sqlite(conn: &Mutex<Connection>, cutoff: i64) {
+        let mut conn = conn.lock();
         let tx = match conn.transaction() {
             Ok(t) => t,
             Err(e) => {
@@ -597,13 +655,23 @@ impl TraceStore {
         }
     }
 
-    /// 删除指定凭据关联的 trace 记录，避免删除账号后新账号复用同一 credential_id
-    /// 时继承旧账号的失败统计。
-    pub fn delete_for_credential(&self, credential_id: u64) {
+    /// 删除指定凭据关联的 trace 记录，避免新账号复用 id 后继承旧统计。
+    pub async fn delete_for_credential(&self, credential_id: u64) {
         if credential_id == 0 {
             return;
         }
-        let mut conn = self.conn.lock();
+        match &self.backend {
+            TraceBackend::Sqlite(conn) => Self::delete_for_credential_sqlite(conn, credential_id),
+            TraceBackend::Postgres(store) => {
+                if let Err(error) = store.delete_for_credential(credential_id).await {
+                    tracing::warn!("trace 凭据清理失败: {}", error);
+                }
+            }
+        }
+    }
+
+    fn delete_for_credential_sqlite(conn: &Mutex<Connection>, credential_id: u64) {
+        let mut conn = conn.lock();
         let tx = match conn.transaction() {
             Ok(t) => t,
             Err(e) => {
@@ -635,11 +703,21 @@ impl TraceStore {
         }
     }
 
-    /// 按凭据聚合失败跳数，归并为三类：鉴权 / 账号风控 / 其他。
-    /// 统计 trace_attempts 里 outcome != 'success' 的跳，按 credential_id + outcome 分组。
-    /// 返回 credential_id → (auth, throttle, other)。仅 warn 失败，返回空。
-    pub fn failure_stats(&self) -> std::collections::HashMap<u64, FailureStats> {
-        let conn = self.conn.lock();
+    /// 按凭据聚合失败跳数，归并为鉴权、账号风控和其他。
+    pub async fn failure_stats(&self) -> std::collections::HashMap<u64, FailureStats> {
+        match &self.backend {
+            TraceBackend::Sqlite(conn) => Self::failure_stats_sqlite(conn),
+            TraceBackend::Postgres(store) => store.failure_stats().await.unwrap_or_else(|error| {
+                tracing::warn!("trace failure_stats 查询失败: {}", error);
+                std::collections::HashMap::new()
+            }),
+        }
+    }
+
+    fn failure_stats_sqlite(
+        conn: &Mutex<Connection>,
+    ) -> std::collections::HashMap<u64, FailureStats> {
+        let conn = conn.lock();
         let mut out: std::collections::HashMap<u64, FailureStats> =
             std::collections::HashMap::new();
         let mut stmt = match conn.prepare(
@@ -804,7 +882,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
         TraceStore {
-            conn: Mutex::new(conn),
+            backend: TraceBackend::Sqlite(Mutex::new(conn)),
             enabled: AtomicBool::new(true),
             retention_days: AtomicU64::new(DEFAULT_RETENTION_DAYS),
         }
@@ -869,8 +947,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn delete_for_credential_removes_failure_stats() {
+    #[tokio::test]
+    async fn delete_for_credential_removes_failure_stats() {
         let store = mem_store();
         store.insert(&sample(TraceSample {
             trace_id: "old",
@@ -885,10 +963,10 @@ mod tests {
             model: "m1",
         }));
 
-        assert!(store.failure_stats().contains_key(&5));
-        store.delete_for_credential(5);
+        assert!(store.failure_stats().await.contains_key(&5));
+        store.delete_for_credential(5).await;
 
-        let stats = store.failure_stats();
+        let stats = store.failure_stats().await;
         assert!(!stats.contains_key(&5));
         assert!(stats.contains_key(&6));
         assert!(
@@ -950,8 +1028,8 @@ mod tests {
         assert_eq!(by_model[0].trace_id, "cut");
     }
 
-    #[test]
-    fn cleanup_removes_old() {
+    #[tokio::test]
+    async fn cleanup_removes_old() {
         let store = mem_store();
         store.insert(&sample(TraceSample {
             trace_id: "recent",
@@ -961,7 +1039,10 @@ mod tests {
         }));
         // 手动塞一条 8 天前的记录
         {
-            let conn = store.conn.lock();
+            let TraceBackend::Sqlite(conn) = &store.backend else {
+                panic!("mem_store must use SQLite");
+            };
+            let conn = conn.lock();
             let old = (Utc::now() - chrono::Duration::days(8)).timestamp();
             conn.execute(
                 "INSERT INTO traces (trace_id, ts, ts_epoch, key_id, key_source, model, is_stream, \
@@ -971,7 +1052,7 @@ mod tests {
             )
             .unwrap();
         }
-        store.cleanup();
+        store.cleanup().await;
         let out = store.query(&TraceQuery {
             limit: 50,
             ..Default::default()

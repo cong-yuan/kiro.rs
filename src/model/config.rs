@@ -255,6 +255,11 @@ pub struct Config {
     #[serde(default = "default_trace_retention_days")]
     pub trace_retention_days: u32,
 
+    /// Trace 数据库 URL。省略时使用本地 SQLite `traces.db`；
+    /// `postgres://` / `postgresql://` 使用 PostgreSQL。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_database_url: Option<String>,
+
     /// 请求用量日志（usage_log.*.jsonl + 聚合桶）保留天数（默认 31）。
     #[serde(default = "default_usage_log_retention_days")]
     pub usage_log_retention_days: u32,
@@ -424,6 +429,7 @@ impl Default for Config {
             default_endpoint: default_endpoint(),
             trace_enabled: default_trace_enabled(),
             trace_retention_days: default_trace_retention_days(),
+            trace_database_url: None,
             usage_log_retention_days: default_usage_log_retention_days(),
             endpoints: HashMap::new(),
             custom_models: Vec::new(),
@@ -509,6 +515,21 @@ mod tests {
     fn model_cache_ttl_accepts_explicit_value() {
         let config: Config = serde_json::from_str(r#"{"modelCacheTtlSecs":120}"#).unwrap();
         assert_eq!(config.model_cache_ttl_secs, 120);
+    }
+
+    #[test]
+    fn trace_database_url_is_optional_and_accepts_postgres() {
+        let legacy: Config = serde_json::from_str("{}").unwrap();
+        assert!(legacy.trace_database_url.is_none());
+        assert!(Config::default().trace_database_url.is_none());
+
+        let config: Config =
+            serde_json::from_str(r#"{"traceDatabaseUrl":"postgresql://kiro:secret@db/kiro"}"#)
+                .unwrap();
+        assert_eq!(
+            config.trace_database_url.as_deref(),
+            Some("postgresql://kiro:secret@db/kiro")
+        );
     }
 
     #[test]
