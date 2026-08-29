@@ -209,7 +209,9 @@ impl KiroProvider {
     ) -> anyhow::Result<()> {
         use crate::kiro::model::credentials::is_placeholder_profile_arn;
 
-        if ctx.credentials.is_api_key_credential() {
+        if ctx.credentials.is_api_key_credential()
+            || ctx.credentials.is_builder_id_credential()
+        {
             return Ok(());
         }
         let needs = match ctx.credentials.profile_arn.as_deref() {
