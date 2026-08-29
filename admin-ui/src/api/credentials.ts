@@ -5,6 +5,7 @@ import type {
   BalanceResponse,
   AvailableModelsResponse,
   ModelTestResponse,
+  CredentialTestResponse,
   SuccessResponse,
   SetDisabledRequest,
   SetPriorityRequest,
@@ -186,6 +187,19 @@ export async function getCurrentCredentialModels(): Promise<AvailableModelsRespo
 export async function testModel(modelId: string): Promise<ModelTestResponse> {
   const { data } = await api.post<ModelTestResponse>(
     '/models/test',
+    { modelId },
+    { timeout: 100000 },
+  )
+  return data
+}
+
+// 锁定指定凭据执行真实账号测试，不允许故障转移到其他账号
+export async function testCredential(
+  id: number,
+  modelId = 'claude-haiku-4.5',
+): Promise<CredentialTestResponse> {
+  const { data } = await api.post<CredentialTestResponse>(
+    `/credentials/${id}/test`,
     { modelId },
     { timeout: 100000 },
   )
