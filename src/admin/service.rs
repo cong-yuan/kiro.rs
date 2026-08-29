@@ -3454,8 +3454,6 @@ impl AdminService {
             }
             idc::PollResult::Error(e) => Err(AdminServiceError::InternalError(e.to_string())),
             idc::PollResult::Success(token) => {
-                self.idc_sessions.lock().remove(session_id);
-
                 // 重新登录模式：更新已有凭据而非创建新凭据
                 if let Some(target_id) = relogin_target_id {
                     let refresh_token = token.refresh_token.ok_or_else(|| {
@@ -3487,6 +3485,7 @@ impl AdminService {
 
                     // 订阅等级/邮箱可能随新身份变化，作废旧缓存待下次查询重建
                     self.invalidate_balance_cache(target_id);
+                    self.idc_sessions.lock().remove(session_id);
                     tracing::info!("IdC 重新登录成功，凭据 #{} Token 已更新", target_id);
                     return Ok(PollIdcLoginResponse::Success {
                         credential_id: target_id,
@@ -3503,9 +3502,12 @@ impl AdminService {
 
                 let credential_id = self
                     .token_manager
-                    .add_credential(new_cred)
+                    .add_verified_credential(new_cred)
                     .await
                     .map_err(|e| AdminServiceError::InternalError(e.to_string()))?;
+
+                // 凭据成功落盘后再删除会话；保存失败时保留会话，允许前端重试。
+                self.idc_sessions.lock().remove(session_id);
 
                 // 主动刷新余额（含订阅等级 / 邮箱）并写入缓存，登录后立即可见
                 if let Err(e) = self.get_balance(credential_id).await {

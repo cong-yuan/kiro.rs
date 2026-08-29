@@ -66,7 +66,7 @@ export function IdcLoginDialog({ open, onOpenChange, onSuccess, mode = 'builder-
       await navigator.clipboard.writeText(url)
       setLinkCopied(true)
       setTimeout(() => setLinkCopied(false), 2000)
-      toast.success('登录链接已复制，请在无痕窗口粘贴打开')
+      toast.success('授权链接已复制')
     } catch {
       toast.error('复制失败，请手动复制链接')
     }
@@ -240,15 +240,29 @@ export function IdcLoginDialog({ open, onOpenChange, onSuccess, mode = 'builder-
               ) : (
                 <>
                   <p className="text-sm text-muted-foreground">在浏览器中访问以下地址并输入验证码</p>
-                  <a
-                    href={session.verificationUriComplete ?? session.verificationUri}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
-                  >
-                    {session.verificationUri}
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </a>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <a
+                      href={session.verificationUriComplete ?? session.verificationUri}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
+                    >
+                      {session.verificationUri}
+                      <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => copyVerificationUrl(session)}
+                    >
+                      {linkCopied ? (
+                        <Check className="h-3.5 w-3.5" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                      {linkCopied ? '已复制' : '复制授权链接'}
+                    </Button>
+                  </div>
                 </>
               )}
               <div className="flex items-center justify-center gap-2">

@@ -3734,6 +3734,25 @@ impl MultiTokenManager {
     /// - `Ok(u64)` - 新凭据 ID
     /// - `Err(_)` - 验证失败或添加失败
     pub async fn add_credential(&self, new_cred: KiroCredentials) -> anyhow::Result<u64> {
+        self.add_credential_inner(new_cred, false).await
+    }
+
+    /// 保存已由 OAuth / Device Authorization 流程验证并签发的凭据。
+    ///
+    /// 与 `add_credential` 的唯一区别是不会再次刷新 Token。调用方必须确保
+    /// `access_token` 来自刚刚成功的授权响应；其余校验、去重和持久化逻辑保持一致。
+    pub async fn add_verified_credential(&self, new_cred: KiroCredentials) -> anyhow::Result<u64> {
+        if new_cred.access_token.as_deref().is_none_or(str::is_empty) {
+            anyhow::bail!("已验证凭据缺少 accessToken");
+        }
+        self.add_credential_inner(new_cred, true).await
+    }
+
+    async fn add_credential_inner(
+        &self,
+        new_cred: KiroCredentials,
+        already_verified: bool,
+    ) -> anyhow::Result<u64> {
         // 1. 基本验证
         if new_cred.is_api_key_credential() {
             let api_key = new_cred
@@ -3792,8 +3811,9 @@ impl MultiTokenManager {
             }
         }
 
-        // 3. 验证凭据有效性（API Key 无需网络刷新）
-        let mut validated_cred = if new_cred.is_api_key_credential() {
+        // 3. 验证凭据有效性。API Key 和刚由 OAuth / Device Authorization
+        // 签发的凭据无需再次请求刷新端点。
+        let mut validated_cred = if new_cred.is_api_key_credential() || already_verified {
             new_cred.clone()
         } else {
             let global_proxy = self.proxy.lock().clone();
@@ -4900,6 +4920,33 @@ mod tests {
         let result = manager.add_credential(duplicate).await;
         assert!(result.is_err());
         assert!(result.err().unwrap().to_string().contains("凭据已存在"));
+    }
+
+    #[tokio::test]
+    async fn test_add_verified_credential_skips_refresh_and_persists() {
+        let config = Config::default();
+        let manager = MultiTokenManager::new(config, vec![], None, None, false).unwrap();
+
+        let credential = KiroCredentials {
+            access_token: Some("device-issued-access-token".to_string()),
+            refresh_token: Some("r".repeat(150)),
+            auth_method: Some("idc".to_string()),
+            client_id: Some("device-client-id".to_string()),
+            client_secret: Some("device-client-secret".to_string()),
+            ..Default::default()
+        };
+
+        let id = manager.add_verified_credential(credential).await.unwrap();
+        let entries = manager.entries.lock();
+        let saved = entries.iter().find(|entry| entry.id == id).unwrap();
+        assert_eq!(
+            saved.credentials.access_token.as_deref(),
+            Some("device-issued-access-token")
+        );
+        assert_eq!(
+            saved.credentials.refresh_token.as_deref(),
+            Some("r".repeat(150).as_str())
+        );
     }
 
     #[tokio::test]
