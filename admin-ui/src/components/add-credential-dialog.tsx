@@ -349,13 +349,13 @@ export function AddCredentialDialog({ open, onOpenChange, metadataSchema }: AddC
               </label>
               <Input
                 id="machineId"
-                placeholder="留空使用配置中字段, 否则由刷新Token自动派生"
+                placeholder="留空则为此凭据生成随机且稳定的 Machine ID"
                 value={machineId}
                 onChange={(e) => setMachineId(e.target.value)}
                 disabled={isPending}
               />
               <p className="text-xs text-muted-foreground">
-                可选，64 位十六进制字符串，留空使用配置中字段, 否则由刷新Token自动派生
+                可选，支持 64 位十六进制或 UUID；留空时优先使用全局配置，否则随机生成并持久化
               </p>
             </div>
 

@@ -1,4 +1,4 @@
-//! 设备指纹生成器
+//! Kiro 客户端实例标识生成器
 //!
 
 use std::collections::HashMap;
@@ -42,15 +42,14 @@ fn normalize_machine_id(machine_id: &str) -> Option<String> {
     None
 }
 
-/// 根据凭证信息生成唯一的 Machine ID
+/// 获取凭据使用的稳定 Machine ID。
 ///
 /// 优先级：
 /// 1. 凭据级 `machineId`（若配置且格式合法）
 /// 2. 全局 `config.machineId`（若配置且格式合法）
-/// 3. 根据凭据类型派生（互斥，由 [`KiroCredentials::is_api_key_credential`] 分流）：
-///    - API Key 凭据：基于 `kiroApiKey` 派生
-///    - OAuth 凭据：基于 `refreshToken` 派生
-/// 4. 兜底：基于随机种子派生，按 `credentials.id` 在进程内缓存（首次触发 warn 日志）
+/// 3. 随机生成（按凭据 ID 在进程内缓存；调用方应将结果持久化）
+///
+/// 随机值不从 API Key 或 refresh token 派生，避免令牌材料与设备标识耦合。
 pub fn generate_from_credentials(credentials: &KiroCredentials, config: &Config) -> String {
     // 如果配置了凭据级 machineId，优先使用
     if let Some(ref machine_id) = credentials.machine_id {
@@ -66,31 +65,16 @@ pub fn generate_from_credentials(credentials: &KiroCredentials, config: &Config)
         }
     }
 
-    // 按凭据类型派生（API Key 与 refreshToken 两条路径互斥，不回落）
-    if credentials.is_api_key_credential() {
-        // API Key 凭据：基于 kiroApiKey 派生
-        if let Some(ref api_key) = credentials.kiro_api_key {
-            if !api_key.is_empty() {
-                return sha256_hex(&format!("KiroAPIKey/{}", api_key));
-            }
-        }
-    } else if let Some(ref refresh_token) = credentials.refresh_token {
-        // OAuth 凭据：基于 refreshToken 派生
-        if !refresh_token.is_empty() {
-            return sha256_hex(&format!("KotlinNativeAPI/{}", refresh_token));
-        }
-    }
-
-    // 兜底：走派生流程生成随机 machineId，按凭据 id 进程内稳定
+    // 不使用凭据秘密派生 Machine ID；生成独立随机值并由调用方持久化。
     fallback_machine_id(credentials)
 }
 
-/// 为缺失派生材料的凭据生成兜底 machineId
+/// 为未配置标识的凭据生成随机 Machine ID。
 ///
-/// - 仍经 `sha256("KiroFallback/<uuid>")` 派生，输出格式与正常路径一致（64 字符十六进制）
+/// - 经 `sha256("KiroFallback/<uuid>")` 生成64字符十六进制值
 /// - 按 `credentials.id` 在进程内缓存；同一凭据多次调用返回同一值
-/// - 进程重启会重新随机；不持久化
-/// - 每个凭据首次生成时 warn 一次
+/// - 调用方负责持久化，确保进程重启后仍保持稳定
+/// - 每个凭据首次生成时记录一次 warn 日志
 fn fallback_machine_id(credentials: &KiroCredentials) -> String {
     let cache = FALLBACK_MACHINE_IDS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut map = cache.lock();
@@ -102,7 +86,7 @@ fn fallback_machine_id(credentials: &KiroCredentials) -> String {
     let derived = sha256_hex(&format!("KiroFallback/{}", seed));
     tracing::warn!(
         credential_id = ?credentials.id,
-        "凭据缺少派生材料（kiroApiKey/refreshToken 均不可用），使用随机兜底 machineId（进程内稳定）"
+        "凭据未配置 machineId，生成随机 machineId（进程内稳定，等待持久化）"
     );
     map.insert(credentials.id, derived.clone());
     derived
@@ -153,16 +137,6 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_with_refresh_token() {
-        let mut credentials = KiroCredentials::default();
-        credentials.refresh_token = Some("test_refresh_token".to_string());
-        let config = Config::default();
-
-        let result = generate_from_credentials(&credentials, &config);
-        assert_eq!(result.len(), 64);
-    }
-
-    #[test]
     fn test_generate_without_credentials_uses_fallback() {
         // 完全空凭据会走兜底分支，返回派生后的随机 machineId
         let credentials = KiroCredentials::default();
@@ -174,42 +148,19 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_with_api_key() {
-        let mut credentials = KiroCredentials::default();
-        credentials.kiro_api_key = Some("ksk_test_api_key".to_string());
-        let config = Config::default();
-
-        let result = generate_from_credentials(&credentials, &config);
-        assert_eq!(result.len(), 64);
-        // 应与 KiroAPIKey/<api_key> 的哈希一致
-        assert_eq!(result, sha256_hex("KiroAPIKey/ksk_test_api_key"));
-    }
-
-    #[test]
-    fn test_api_key_and_refresh_token_are_mutually_exclusive() {
-        // 同时存在 kiroApiKey 和 refreshToken 时，应走 API Key 分支
-        let mut credentials = KiroCredentials::default();
-        credentials.kiro_api_key = Some("ksk_test".to_string());
-        credentials.refresh_token = Some("should_not_be_used".to_string());
-        let config = Config::default();
-
-        let result = generate_from_credentials(&credentials, &config);
-        assert_eq!(result, sha256_hex("KiroAPIKey/ksk_test"));
-    }
-
-    #[test]
-    fn test_api_key_auth_method_empty_uses_fallback_not_refresh_token() {
-        // auth_method=api_key 但 kiro_api_key 为空：不回落到 refreshToken，走兜底分支
+    fn test_tokens_do_not_affect_random_machine_id() {
         let mut credentials = KiroCredentials::default();
         credentials.id = Some(u64::MAX - 1);
-        credentials.auth_method = Some("api_key".to_string());
-        credentials.refresh_token = Some("should_not_be_used".to_string());
+        credentials.refresh_token = Some("first-token".to_string());
         let config = Config::default();
 
-        let result = generate_from_credentials(&credentials, &config);
-        assert_eq!(result.len(), 64);
-        // 必须不是基于 refresh_token 派生的值（互斥性验证）
-        assert_ne!(result, sha256_hex("KotlinNativeAPI/should_not_be_used"));
+        let first = generate_from_credentials(&credentials, &config);
+        credentials.refresh_token = Some("rotated-token".to_string());
+        credentials.kiro_api_key = Some("ksk_other-secret".to_string());
+        let second = generate_from_credentials(&credentials, &config);
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
     }
 
     #[test]

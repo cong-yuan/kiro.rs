@@ -1326,9 +1326,9 @@ impl MultiTokenManager {
                 if cred.fill_default_profile_arn() {
                     has_new_ids = true;
                 }
-                if cred.machine_id.is_none() {
-                    cred.machine_id =
-                        Some(machine_id::generate_from_credentials(&cred, config_ref));
+                let resolved_machine_id = machine_id::generate_from_credentials(&cred, config_ref);
+                if cred.machine_id.as_deref() != Some(resolved_machine_id.as_str()) {
+                    cred.machine_id = Some(resolved_machine_id);
                     has_new_machine_ids = true;
                 }
                 let disabled_reason = if cred.disabled {
@@ -3860,6 +3860,9 @@ impl MultiTokenManager {
         validated_cred.auth_region = new_cred.auth_region;
         validated_cred.api_region = new_cred.api_region;
         validated_cred.machine_id = new_cred.machine_id;
+        let resolved_machine_id =
+            machine_id::generate_from_credentials(&validated_cred, &self.config);
+        validated_cred.machine_id = Some(resolved_machine_id);
         validated_cred.email = new_cred.email;
         validated_cred.proxy_url = new_cred.proxy_url;
         validated_cred.proxy_username = new_cred.proxy_username;
@@ -4947,6 +4950,13 @@ mod tests {
             saved.credentials.refresh_token.as_deref(),
             Some("r".repeat(150).as_str())
         );
+        let machine_id = saved
+            .credentials
+            .machine_id
+            .as_deref()
+            .expect("新凭据应在入库时获得 Machine ID");
+        assert_eq!(machine_id.len(), 64);
+        assert!(machine_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
     }
 
     #[tokio::test]
