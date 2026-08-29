@@ -3325,8 +3325,8 @@ impl MultiTokenManager {
                 .ok_or_else(|| anyhow::anyhow!("凭据不存在: {}", id))?
         };
 
-        // API Key 凭据没有 profileArn 概念
-        if credentials.is_api_key_credential() {
+        // API Key 与纯 Builder ID 凭据都没有企业 profile 可解析。
+        if credentials.is_api_key_credential() || credentials.is_builder_id_credential() {
             return Ok(None);
         }
 
@@ -4610,6 +4610,29 @@ mod tests {
             ..KiroCredentials::default()
         };
         MultiTokenManager::new(config, vec![cred], None, None, true).unwrap()
+    }
+
+    #[tokio::test]
+    async fn builder_id_skips_enterprise_profile_resolution() {
+        let credential = KiroCredentials {
+            id: Some(1),
+            auth_method: Some("idc".to_string()),
+            provider: Some("BuilderId".to_string()),
+            start_url: Some("https://view.awsapps.com/start".to_string()),
+            profile_arn: Some(
+                crate::kiro::model::credentials::BUILDER_ID_PROFILE_ARN.to_string(),
+            ),
+            ..Default::default()
+        };
+        let manager =
+            MultiTokenManager::new(Config::default(), vec![credential], None, None, false).unwrap();
+
+        let resolved = manager
+            .resolve_profile_arn_for(1, "unused-builder-token")
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, None);
     }
 
     #[test]

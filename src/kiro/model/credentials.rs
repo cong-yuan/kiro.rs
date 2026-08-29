@@ -485,7 +485,7 @@ pub struct KiroCredentials {
     pub api_region: Option<String>,
 
     /// 凭据级 Machine ID 配置（可选）
-    /// 未配置时回退到 config.json 的 machineId；都未配置时由 refreshToken 派生
+    /// 未配置时回退到 config.json 的 machineId；都未配置时随机生成并持久化
     #[serde(skip_serializing_if = "Option::is_none")]
     pub machine_id: Option<String>,
 
@@ -912,6 +912,39 @@ impl KiroCredentials {
                 .unwrap_or(false)
     }
 
+    /// 是否为纯 AWS Builder ID 凭据。
+    ///
+    /// 新凭据优先依据 provider 判断；兼容旧凭据缺少 provider 的情况，
+    /// 此时用 IdC authMethod 与 Builder ID 默认 Start URL 联合识别。
+    pub fn is_builder_id_credential(&self) -> bool {
+        if let Some(provider) = self.provider.as_deref() {
+            if provider.eq_ignore_ascii_case("BuilderId") {
+                return true;
+            }
+            if provider.eq_ignore_ascii_case("Enterprise")
+                || provider.eq_ignore_ascii_case("IAM_SSO")
+            {
+                return false;
+            }
+        }
+
+        let is_idc = self
+            .auth_method
+            .as_deref()
+            .map(|method| canonicalize_auth_method_value(method).eq_ignore_ascii_case("idc"))
+            .unwrap_or(false);
+        let uses_builder_start_url = self
+            .start_url
+            .as_deref()
+            .map(|url| {
+                url.trim()
+                    .trim_end_matches('/')
+                    .eq_ignore_ascii_case("https://view.awsapps.com/start")
+            })
+            .unwrap_or(false);
+        is_idc && uses_builder_start_url
+    }
+
     /// 是否为企业 SSO (external_idp) 凭据。
     ///
     /// 容忍未规范化的别名（azuread/entra/... ），统一按规范值判断。
@@ -1258,6 +1291,31 @@ mod tests {
         assert!(!is_placeholder_profile_arn(
             "arn:aws:codewhisperer:us-east-1:123456789012:profile/REAL123"
         ));
+    }
+
+    #[test]
+    fn test_builder_id_credential_detection() {
+        let explicit_builder = KiroCredentials {
+            provider: Some("BuilderId".to_string()),
+            auth_method: Some("idc".to_string()),
+            ..Default::default()
+        };
+        assert!(explicit_builder.is_builder_id_credential());
+
+        let legacy_builder = KiroCredentials {
+            auth_method: Some("builder-id".to_string()),
+            start_url: Some("https://view.awsapps.com/start/".to_string()),
+            ..Default::default()
+        };
+        assert!(legacy_builder.is_builder_id_credential());
+
+        let enterprise = KiroCredentials {
+            provider: Some("Enterprise".to_string()),
+            auth_method: Some("idc".to_string()),
+            start_url: Some("https://view.awsapps.com/start".to_string()),
+            ..Default::default()
+        };
+        assert!(!enterprise.is_builder_id_credential());
     }
 
     #[test]
