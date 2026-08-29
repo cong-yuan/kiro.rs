@@ -440,6 +440,51 @@ pub struct ModelTestResponse {
     pub credit_unit: Option<String>,
 }
 
+/// 指定凭据的真实账号测试参数。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialTestRequest {
+    #[serde(default)]
+    pub model_id: Option<String>,
+}
+
+/// 账号测试中的单项检查结果。
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialTestCheck {
+    pub name: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subscription_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_current: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_limit: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
+}
+
+/// 指定凭据的真实账号测试结果。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialTestResponse {
+    pub success: bool,
+    pub credential_id: u64,
+    pub model_id: String,
+    pub latency_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub checks: Vec<CredentialTestCheck>,
+}
+
 // ============ 一键超额 ============
 
 /// 一键超额禁用结果

@@ -22,7 +22,7 @@ use super::{
         AddCredentialRequest, AddProxyRequest, AssignProxyRequest, AssignRoundRobinRequest,
         BatchAddProxyRequest, BatchImportEvent, BatchImportRequest, BatchImportSummary,
         ClientKeyItem, ClientKeysResponse, CompleteSocialLoginRequest, CreateClientKeyRequest,
-        CreateClientKeyResponse, ModelTestRequest,
+        CreateClientKeyResponse, CredentialTestRequest, ModelTestRequest,
         CredentialMetadataSchemaConfig,
         SetAccountRpmLimitConfigRequest, SetAccountThrottleConfigRequest, SetDisabledRequest,
         SetGlobalProxyRequest,
@@ -181,6 +181,19 @@ pub async fn get_credential_models(
 /// 使用账号池当前选中的可用凭据实时查询上游模型列表。
 pub async fn get_current_models(State(state): State<AdminState>) -> impl IntoResponse {
     match state.service.get_current_available_models().await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => error.into_http_response(),
+    }
+}
+
+/// POST /api/admin/credentials/:id/test
+/// 锁定指定凭据执行 Token、额度、模型列表和真实生成测试。
+pub async fn test_credential(
+    State(state): State<AdminState>,
+    Path(id): Path<u64>,
+    Json(request): Json<CredentialTestRequest>,
+) -> impl IntoResponse {
+    match state.service.test_credential(id, request).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => error.into_http_response(),
     }

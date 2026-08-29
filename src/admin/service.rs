@@ -44,7 +44,8 @@ use super::types::{
     EnableOverageAllResult, ExportedAccount,
     ExportedCredentials, GitHubRateLimitInfo, ImageUpdateResponse, LoadBalancingModeResponse,
     CredentialMetadataSchemaConfig,
-    LogGovernanceConfigResponse, ModelSelectionMode, ModelTestRequest, ModelTestResponse,
+    CredentialTestCheck, CredentialTestRequest, CredentialTestResponse, LogGovernanceConfigResponse,
+    ModelSelectionMode, ModelTestRequest, ModelTestResponse,
     PollIdcLoginResponse, ProxyCheckAllResponse, ProxyCheckResponse, ProxyPoolEntry,
     ProxyPoolResponse, QuotaExceededResult, SelfHealConfigResponse,
     SetAccountRpmLimitConfigRequest, SetAccountThrottleConfigRequest, SetLoadBalancingModeRequest,
@@ -177,6 +178,44 @@ fn available_models_response(
         selection_mode,
         models,
     }
+}
+
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    started.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn failed_credential_test_check(name: &str, error: &str) -> CredentialTestCheck {
+    CredentialTestCheck {
+        name: name.to_string(),
+        success: false,
+        error: Some(error.chars().take(800).collect()),
+        ..Default::default()
+    }
+}
+
+fn decode_account_test_reply(bytes: &[u8]) -> anyhow::Result<String> {
+    let mut decoder = EventStreamDecoder::new();
+    decoder.feed(bytes)?;
+    let mut reply = String::new();
+    for frame in decoder.decode_iter() {
+        match Event::from_frame(frame?)? {
+            Event::AssistantResponse(response) => reply.push_str(&response.content),
+            Event::Error {
+                error_code,
+                error_message,
+            } => anyhow::bail!("{error_code}: {error_message}"),
+            Event::Exception {
+                exception_type,
+                message,
+            } => anyhow::bail!("{exception_type}: {message}"),
+            _ => {}
+        }
+    }
+    let reply = strip_tool_use_xml_leaks(&reply).trim().to_string();
+    if reply.is_empty() {
+        anyhow::bail!("模型返回了空响应");
+    }
+    Ok(reply)
 }
 
 fn validate_model_id(model_id: &str) -> Result<&str, AdminServiceError> {
@@ -1143,6 +1182,130 @@ impl AdminService {
             credit_usage: (credit_usage > 0.0).then_some(credit_usage),
             credit_unit,
         })
+    }
+
+    /// 参考 Kiro-Go-Plus 对指定凭据执行真实账号测试。
+    ///
+    /// Token、额度与模型列表用于分项诊断；只有该凭据的真实生成请求返回非空内容，
+    /// 最终结果才算成功。整个过程不会故障转移到其他凭据。
+    pub async fn test_credential(
+        &self,
+        id: u64,
+        request: CredentialTestRequest,
+    ) -> Result<CredentialTestResponse, AdminServiceError> {
+        const DEFAULT_MODEL: &str = "claude-haiku-4.5";
+        let model_id = validate_model_id(request.model_id.as_deref().unwrap_or(DEFAULT_MODEL))?
+            .to_string();
+        let provider = self
+            .kiro_provider
+            .as_ref()
+            .ok_or_else(|| AdminServiceError::InternalError("Kiro Provider 未配置".to_string()))?;
+        let started = std::time::Instant::now();
+        let mut checks = Vec::new();
+
+        match self.token_manager.acquire_context_for(id).await {
+            Ok(_) => checks.push(CredentialTestCheck {
+                name: "token".to_string(),
+                success: true,
+                ..Default::default()
+            }),
+            Err(error) => {
+                let message = error.to_string();
+                checks.push(failed_credential_test_check("token", &message));
+                return Ok(CredentialTestResponse {
+                    success: false,
+                    credential_id: id,
+                    model_id,
+                    latency_ms: elapsed_ms(started),
+                    reply: None,
+                    error: Some(message),
+                    checks,
+                });
+            }
+        }
+
+        match self.fetch_balance(id).await {
+            Ok(balance) => checks.push(CredentialTestCheck {
+                name: "usage".to_string(),
+                success: true,
+                subscription_title: balance.subscription_title,
+                usage_current: Some(balance.current_usage),
+                usage_limit: Some(balance.usage_limit),
+                ..Default::default()
+            }),
+            Err(error) => checks.push(failed_credential_test_check("usage", &error.to_string())),
+        }
+
+        match self.token_manager.get_available_models_for(id).await {
+            Ok(models) => checks.push(CredentialTestCheck {
+                name: "models".to_string(),
+                success: true,
+                count: Some(models.models.len()),
+                ..Default::default()
+            }),
+            Err(error) => checks.push(failed_credential_test_check("models", &error.to_string())),
+        }
+
+        let conversation_state = ConversationState::new(Uuid::new_v4().to_string())
+            .with_agent_continuation_id(Uuid::new_v4().to_string())
+            .with_agent_task_type("vibe")
+            .with_chat_trigger_type("MANUAL")
+            .with_current_message(CurrentMessage::new(
+                UserInputMessage::new("Reply with exactly: OK", &model_id).with_origin("AI_EDITOR"),
+            ));
+        let body = serde_json::to_string(&KiroRequest {
+            conversation_state,
+            profile_arn: None,
+            additional_model_request_fields: None,
+        })
+        .map_err(|error| AdminServiceError::InternalError(error.to_string()))?;
+        let generation_started = std::time::Instant::now();
+        let generation = tokio::time::timeout(std::time::Duration::from_secs(90), async {
+            let call = provider.call_api_for_credential(id, &body).await?;
+            let bytes = call.response.bytes().await?;
+            decode_account_test_reply(&bytes)
+        })
+        .await;
+
+        match generation {
+            Ok(Ok(reply)) => {
+                checks.push(CredentialTestCheck {
+                    name: "generation".to_string(),
+                    success: true,
+                    latency_ms: Some(elapsed_ms(generation_started)),
+                    reply: Some(reply.clone()),
+                    ..Default::default()
+                });
+                Ok(CredentialTestResponse {
+                    success: true,
+                    credential_id: id,
+                    model_id,
+                    latency_ms: elapsed_ms(started),
+                    reply: Some(reply),
+                    error: None,
+                    checks,
+                })
+            }
+            result => {
+                let message = match result {
+                    Err(_) => "账号测试生成请求超时".to_string(),
+                    Ok(Err(error)) => error.to_string(),
+                    Ok(Ok(_)) => unreachable!(),
+                };
+                let mut check = failed_credential_test_check("generation", &message);
+                check.latency_ms = Some(elapsed_ms(generation_started));
+                checks.push(check);
+                Ok(CredentialTestResponse {
+                    success: false,
+                    credential_id: id,
+                    model_id,
+                    latency_ms: elapsed_ms(started),
+                    reply: None,
+                    error: Some(message),
+                    checks,
+                })
+            }
+        }
     }
 
     /// 批量刷新所有非禁用凭据的余额（用于后台调度）

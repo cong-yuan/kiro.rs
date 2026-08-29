@@ -149,6 +149,28 @@ export interface ModelTestResponse {
   creditUnit?: string
 }
 
+export interface CredentialTestCheck {
+  name: string
+  success: boolean
+  error?: string
+  count?: number
+  subscriptionTitle?: string
+  usageCurrent?: number
+  usageLimit?: number
+  latencyMs?: number
+  reply?: string
+}
+
+export interface CredentialTestResponse {
+  success: boolean
+  credentialId: number
+  modelId: string
+  latencyMs: number
+  reply?: string
+  error?: string
+  checks: CredentialTestCheck[]
+}
+
 // 成功响应
 export interface SuccessResponse {
   success: boolean

@@ -32,8 +32,9 @@ pub enum PollResult {
 /// AWS Builder ID / IAM Identity Center 的默认 Start URL
 pub const BUILDER_ID_START_URL: &str = "https://view.awsapps.com/start";
 
-/// AWS 授权页面展示的 OIDC 客户端名称。
-const KIRO_OIDC_CLIENT_NAME: &str = "Kiro IDE";
+/// AWS 授权页面展示的设备码 OIDC 客户端名称。
+/// 与 Kiro-Go-Plus 的 Builder ID 设备授权流程保持一致。
+const KIRO_OIDC_CLIENT_NAME: &str = "Kiro";
 
 /// Kiro 登录流程使用的浏览器兼容 User-Agent。
 const KIRO_LOGIN_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36";
@@ -270,7 +271,7 @@ mod tests {
 
     #[test]
     fn login_identity_matches_kiro_on_macos_chrome() {
-        assert_eq!(KIRO_OIDC_CLIENT_NAME, "Kiro IDE");
+        assert_eq!(KIRO_OIDC_CLIENT_NAME, "Kiro");
         assert!(KIRO_LOGIN_USER_AGENT.contains("Mac OS X 10_15_7"));
         assert!(KIRO_LOGIN_USER_AGENT.contains("Chrome/151.0.0.0"));
     }

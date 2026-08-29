@@ -128,6 +128,7 @@ import {
 } from "@dnd-kit/sortable";
 import {
   getCredentialBalance,
+  testCredential,
   forceRefreshToken,
   disableQuotaExceeded,
   enableOverageForAllCapable,
@@ -997,7 +998,7 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
 
   const handleBatchVerify = async () => {
     if (selectedIds.size === 0) {
-      toast.error("请先选择要验活的凭据");
+      toast.error("请先选择要测试的凭据");
       return;
     }
     setVerifying(true);
@@ -1033,15 +1034,24 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
           return n;
         });
         try {
-          const balance = await getCredentialBalance(id);
-          successCount++;
+          const result = await testCredential(id);
+          if (result.success) successCount++;
+          const usageCheck = result.checks.find((check) => check.name === "usage");
           setVerifyResults((prev) => {
             const n = new Map(prev);
             n.set(id, {
               id,
-              status: "success",
-              usage: `${balance.currentUsage}/${balance.usageLimit}`,
+              status: result.success ? "success" : "failed",
+              usage:
+                usageCheck?.usageCurrent != null && usageCheck.usageLimit != null
+                  ? `${usageCheck.usageCurrent}/${usageCheck.usageLimit}`
+                  : undefined,
               email: emailById.get(id),
+              model: result.modelId,
+              latencyMs: result.latencyMs,
+              reply: result.reply,
+              checks: result.checks,
+              error: result.error,
             });
             return n;
           });
@@ -1066,7 +1076,7 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
     );
     setVerifying(false);
     if (!cancelVerifyRef.current)
-      toast.success(`验活完成：成功 ${successCount}/${ids.length}`);
+      toast.success(`账号测试完成：成功 ${successCount}/${ids.length}`);
   };
 
   const handleCancelVerify = () => {
@@ -1074,7 +1084,7 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
     setVerifying(false);
   };
 
-  // 在批量验活窗口删除单个失败凭据
+  // 在批量账号测试窗口删除单个失败凭据
   const handleDeleteVerifyResult = (id: number) => {
     deleteCredential(id, {
       onSuccess: () => {
@@ -1089,7 +1099,7 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
     });
   };
 
-  // 一键删除批量验活窗口里全部失败凭据（并发删除）
+  // 一键删除批量账号测试窗口里全部失败凭据（并发删除）
   const handleDeleteFailedVerify = () => {
     const failedIds = Array.from(verifyResults.values())
       .filter((r) => r.status === "failed")
@@ -1529,7 +1539,7 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
                 variant="secondary"
               >
                 <CheckCircle2 className="h-3.5 w-3.5 animate-spin" />
-                验活中… {verifyProgress.current}/{verifyProgress.total}
+                测试中… {verifyProgress.current}/{verifyProgress.total}
               </Button>
             )}
             {batchDeleting && (
@@ -1847,7 +1857,7 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end">
                   {/*
-                    批量操作（验活 / 刷新 Token / 恢复异常 / 分组 / 删除）已移到吸底
+                    批量操作（账号测试 / 刷新 Token / 恢复异常 / 分组 / 删除）已移到吸底
                     批量栏：它们只在选中若干行后才有意义，藏在二级菜单里等于选完还要
                     再点两层，而且操作入口会随页面滚动离开视野。
                     这里只保留与选中无关的全局维护动作。
@@ -2151,8 +2161,8 @@ export function Dashboard({ onLogout, embedded = false }: DashboardProps) {
                   className={`h-3.5 w-3.5 ${verifying ? "animate-spin" : ""}`}
                 />
                 {verifying
-                  ? `验活中 ${verifyProgress.current}/${verifyProgress.total}`
-                  : "验活"}
+                  ? `测试中 ${verifyProgress.current}/${verifyProgress.total}`
+                  : "账号测试"}
               </Button>
               <Button
                 onClick={handleBatchForceRefresh}

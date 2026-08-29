@@ -567,7 +567,7 @@ export function CredentialCard({
       if (provider === "azuread") return "Entra ID";
       return "企业 SSO";
     }
-    return credential.authMethod;
+    return credential.authMethod || "未知";
   })();
 
   const isQuotaExceeded = balance
@@ -847,8 +847,24 @@ export function CredentialCard({
       </label>
 
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2 text-sm font-medium leading-5">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-sm font-medium leading-5">
           <CredentialLabel id={credential.id} email={credential.email} />
+          <Badge
+            variant="outline"
+            className="shrink-0 px-1.5 py-0 text-[10px]"
+            title={`凭据类型：${authLabel}`}
+          >
+            凭据 · {authLabel}
+          </Badge>
+          {subscriptionBadge ?? (
+            <Badge
+              variant="secondary"
+              className="shrink-0 px-1.5 py-0 text-[10px]"
+              title="订阅类型：未知"
+            >
+              订阅 · 未知
+            </Badge>
+          )}
         </div>
         <div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden [&>*]:shrink-0">
           {statusBadges}

@@ -3589,6 +3589,18 @@ impl MultiTokenManager {
         Ok((token, credentials))
     }
 
+    /// 为账号测试获取指定凭据的调用上下文。
+    ///
+    /// 只准备该 ID 的 Token，不参与账号池选号、RPM 计数或故障转移。
+    pub async fn acquire_context_for(&self, id: u64) -> anyhow::Result<CallContext> {
+        let (token, credentials) = self.prepare_request_token(id).await?;
+        Ok(CallContext {
+            id,
+            credentials,
+            token,
+        })
+    }
+
     /// 获取指定凭据当前可用的模型列表（Admin API）。
     ///
     /// Admin 查询保持实时语义；成功结果同时更新该凭据的共享缓存。
@@ -6690,6 +6702,34 @@ mod tests {
         c.expires_at = Some((Utc::now() + Duration::hours(1)).to_rfc3339());
         c.groups = groups.iter().map(|s| s.to_string()).collect();
         c
+    }
+
+    #[tokio::test]
+    async fn account_test_context_uses_requested_credential_in_balanced_mode() {
+        let mut config = Config::default();
+        config.load_balancing_mode = "balanced".to_string();
+        let credentials = vec![
+            KiroCredentials {
+                id: Some(1),
+                auth_method: Some("api_key".to_string()),
+                kiro_api_key: Some("ksk-first".to_string()),
+                ..Default::default()
+            },
+            KiroCredentials {
+                id: Some(2),
+                auth_method: Some("api_key".to_string()),
+                kiro_api_key: Some("ksk-requested".to_string()),
+                ..Default::default()
+            },
+        ];
+        let manager =
+            MultiTokenManager::new(config, credentials, None, None, false).unwrap();
+
+        let context = manager.acquire_context_for(2).await.unwrap();
+
+        assert_eq!(context.id, 2);
+        assert_eq!(context.token, "ksk-requested");
+        assert_eq!(manager.snapshot().current_id, 1);
     }
 
     fn model_response(ids: &[&str]) -> ListAvailableModelsResponse {

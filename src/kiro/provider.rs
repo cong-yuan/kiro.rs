@@ -264,6 +264,50 @@ impl KiroProvider {
         self.call_api_with_retry(request_body, false, sink, group).await
     }
 
+    /// 使用指定凭据发送一次真实 API 请求，不经过账号池选号或故障转移。
+    ///
+    /// 仅供管理端账号测试使用；失败不会借用其他凭据，也不会修改调度失败计数。
+    pub async fn call_api_for_credential(
+        &self,
+        credential_id: u64,
+        request_body: &str,
+    ) -> anyhow::Result<KiroCallResult> {
+        let mut ctx = self
+            .token_manager
+            .acquire_context_for(credential_id)
+            .await?;
+        self.ensure_profile_arn(&mut ctx).await?;
+
+        let config = self.token_manager.config();
+        let machine_id = machine_id::generate_from_credentials(&ctx.credentials, config);
+        let endpoint = self.endpoint_for(&ctx.credentials)?;
+        let rctx = RequestContext {
+            credentials: &ctx.credentials,
+            token: &ctx.token,
+            machine_id: &machine_id,
+            config,
+        };
+        let url = endpoint.api_url(&rctx);
+        let body = endpoint.transform_api_body(request_body, &rctx);
+        let request = self
+            .client_for(&ctx.credentials)?
+            .post(&url)
+            .body(body)
+            .header("content-type", endpoint.content_type())
+            .header("Connection", "close");
+        let response = endpoint.decorate_api(request, &rctx).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("账号测试生成请求失败: {} {}", status, body);
+        }
+
+        Ok(KiroCallResult {
+            response,
+            credential_id: ctx.id,
+        })
+    }
+
     /// 发送流式 API 请求
     pub async fn call_api_stream(
         &self,

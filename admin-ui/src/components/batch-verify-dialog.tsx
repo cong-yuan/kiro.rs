@@ -7,6 +7,14 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Trash2 } from 'lucide-react'
+import type { CredentialTestCheck } from '@/types/api'
+
+const CHECK_LABELS: Record<string, string> = {
+  token: 'Token',
+  usage: '额度',
+  models: '模型',
+  generation: '生成',
+}
 
 export interface VerifyResult {
   id: number
@@ -14,6 +22,10 @@ export interface VerifyResult {
   usage?: string
   error?: string
   email?: string
+  model?: string
+  latencyMs?: number
+  reply?: string
+  checks?: CredentialTestCheck[]
 }
 
 interface BatchVerifyDialogProps {
@@ -50,7 +62,7 @@ export function BatchVerifyDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>批量验活</DialogTitle>
+          <DialogTitle>批量账号测试</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4 py-4">
@@ -58,7 +70,7 @@ export function BatchVerifyDialog({
           {verifying && (
             <div className="space-y-2">
               <div className="flex justify-between text-sm">
-                <span>验活进度</span>
+                <span>测试进度</span>
                 <span>{progress.current} / {progress.total}</span>
               </div>
               <div className="w-full bg-secondary rounded-full h-2">
@@ -73,7 +85,7 @@ export function BatchVerifyDialog({
           {/* 统计信息 */}
           {results.size > 0 && (
             <div className="flex justify-between items-center text-sm font-medium">
-              <span>验活结果</span>
+              <span>测试结果</span>
               <span>
                 成功: {successCount} / 失败: {failedCount}
               </span>
@@ -143,6 +155,27 @@ export function BatchVerifyDialog({
                       </span>
                     </div>
                   </div>
+                  {(result.model || result.latencyMs != null || result.reply) && (
+                    <div className="mt-1 text-xs opacity-90">
+                      {result.model && <span>模型: {result.model}</span>}
+                      {result.latencyMs != null && <span> · {result.latencyMs}ms</span>}
+                      {result.reply && <span> · 回复: {result.reply}</span>}
+                    </div>
+                  )}
+                  {result.checks && result.checks.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {result.checks.map((check) => (
+                        <Badge
+                          key={check.name}
+                          variant={check.success ? 'success' : 'destructive'}
+                          className="text-[10px]"
+                          title={check.error}
+                        >
+                          {CHECK_LABELS[check.name] ?? check.name} {check.success ? '✓' : '✗'}
+                        </Badge>
+                      ))}
+                    </div>
+                  )}
                   {result.error && (
                     <div className="text-xs mt-1 opacity-90">
                       错误: {result.error}
@@ -156,7 +189,7 @@ export function BatchVerifyDialog({
           {/* 提示信息 */}
           {verifying && (
             <p className="text-xs text-muted-foreground">
-              💡 验活在后台并发进行，你可以关闭此窗口，验活会继续。完成后可在此窗口删除失效/封号的账号。
+              💡 账号测试会锁定每个凭据执行 Token、实时额度、模型列表和真实生成检查，不会故障转移到其他账号。
             </p>
           )}
         </div>
@@ -176,7 +209,7 @@ export function BatchVerifyDialog({
                 variant="destructive"
                 onClick={onCancel}
               >
-                取消验活
+                取消测试
               </Button>
             </>
           ) : (
