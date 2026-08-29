@@ -271,6 +271,17 @@ export function ReloginDialog({ open, onOpenChange, credential }: ReloginDialogP
     }, interval * 1000)
   }
 
+  const copyIdcLoginUrl = async () => {
+    if (!idcSession) return
+    const url = idcSession.verificationUriComplete ?? idcSession.verificationUri
+    try {
+      await navigator.clipboard.writeText(url)
+      toast.success('Kiro 登录链接已复制')
+    } catch {
+      toast.error('复制失败，请手动复制登录链接')
+    }
+  }
+
   const copyIdcCode = () => {
     if (!idcSession) return
     navigator.clipboard.writeText(idcSession.userCode)
@@ -363,8 +374,8 @@ export function ReloginDialog({ open, onOpenChange, credential }: ReloginDialogP
                 className={`flex items-start gap-3 rounded-lg border p-3 text-left transition-colors hover:bg-accent ${authMethod === 'idc' ? 'border-primary bg-accent/50' : ''}`}
               >
                 <div>
-                  <p className="text-sm font-medium">AWS SSO / Builder ID（IdC）</p>
-                  <p className="text-xs text-muted-foreground mt-0.5">通过 AWS Identity Center 设备授权</p>
+                  <p className="text-sm font-medium">Kiro 登录（AWS Builder ID）</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">通过 Kiro 设备授权流程重新登录</p>
                 </div>
               </button>
               <button
@@ -456,16 +467,22 @@ export function ReloginDialog({ open, onOpenChange, credential }: ReloginDialogP
         {step === 'waiting' && method === 'idc' && idcSession && (
           <div className="space-y-4 py-2">
             <div className="rounded-lg border bg-muted/50 p-4 text-center space-y-3">
-              <p className="text-sm text-muted-foreground">在浏览器中访问以下地址并输入验证码</p>
-              <a
-                href={idcSession.verificationUriComplete ?? idcSession.verificationUri}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
-              >
-                {idcSession.verificationUri}
-                <ExternalLink className="h-3.5 w-3.5" />
-              </a>
+              <p className="text-sm text-muted-foreground">打开 Kiro 登录链接并输入验证码</p>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <a
+                  href={idcSession.verificationUriComplete ?? idcSession.verificationUri}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
+                >
+                  {idcSession.verificationUri}
+                  <ExternalLink className="h-3.5 w-3.5" />
+                </a>
+                <Button size="sm" variant="outline" onClick={copyIdcLoginUrl}>
+                  <Copy className="h-3.5 w-3.5" />
+                  复制登录链接
+                </Button>
+              </div>
               <div className="flex items-center justify-center gap-2">
                 <span className="font-mono text-2xl font-bold tracking-widest">{idcSession.userCode}</span>
                 <Button variant="ghost" size="icon" className="h-7 w-7" onClick={copyIdcCode}>
