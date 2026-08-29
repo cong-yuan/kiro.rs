@@ -106,7 +106,7 @@ export function IdcLoginDialog({ open, onOpenChange, onSuccess, mode = 'builder-
       try {
         const result = await pollIdcLogin(sessionId)
         if (result.status === 'pending') {
-          schedulePoll(sessionId, interval)
+          schedulePoll(sessionId, result.pollInterval ?? interval)
         } else if (result.status === 'success') {
           setCredentialId(result.credentialId)
           setStep('done')

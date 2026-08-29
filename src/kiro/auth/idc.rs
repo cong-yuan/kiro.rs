@@ -19,6 +19,8 @@ use crate::model::config::Config;
 pub enum PollResult {
     /// 用户尚未完成授权，继续等待
     Pending,
+    /// AWS 要求降低轮询频率（RFC 8628：后续间隔至少增加 5 秒）
+    SlowDown,
     /// 授权成功，返回 token
     Success(CreateTokenResponse),
     /// 设备码已过期，需重新发起
@@ -39,8 +41,56 @@ const KIRO_SCOPES: &[&str] = &[
     "codewhisperer:taskassist",
 ];
 
-fn oidc_endpoint(region: &str) -> String {
-    format!("https://oidc.{}.amazonaws.com", region)
+/// 规范化 AWS Region，并拒绝可改变 OIDC 主机名的字符。
+pub fn normalize_region(raw: &str) -> anyhow::Result<String> {
+    let region = raw.trim().to_ascii_lowercase();
+    let parts: Vec<&str> = region.split('-').collect();
+    let valid = (3..=5).contains(&parts.len())
+        && parts.first().is_some_and(|part| {
+            part.len() == 2 && part.bytes().all(|byte| byte.is_ascii_lowercase())
+        })
+        && parts.last().is_some_and(|part| {
+            !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        && parts[1..parts.len() - 1].iter().all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        });
+    if !valid {
+        anyhow::bail!("AWS Region 格式无效: {}", raw.trim());
+    }
+    Ok(region)
+}
+
+/// 规范化 IAM Identity Center Start URL，只允许 AWS 托管的 HTTPS `/start` 地址。
+pub fn normalize_start_url(raw: &str) -> anyhow::Result<String> {
+    let mut url = reqwest::Url::parse(raw.trim()).context("SSO Start URL 无法解析")?;
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    let trusted_host = host.ends_with(".awsapps.com") || host.ends_with(".awsapps.cn");
+    if url.scheme() != "https"
+        || !trusted_host
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || url.path().trim_end_matches('/') != "/start"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        anyhow::bail!(
+            "SSO Start URL 必须是 AWS 托管的 HTTPS 地址，例如 https://d-xxxxxxxxxx.awsapps.com/start"
+        );
+    }
+    url.set_path("/start");
+    Ok(url.to_string().trim_end_matches('/').to_string())
+}
+
+fn oidc_endpoint(region: &str) -> anyhow::Result<String> {
+    Ok(format!(
+        "https://oidc.{}.amazonaws.com",
+        normalize_region(region)?
+    ))
 }
 
 /// 注册 OIDC 客户端
@@ -55,7 +105,9 @@ pub async fn register_client(
     config: &Config,
     proxy: Option<&ProxyConfig>,
 ) -> anyhow::Result<RegisterClientResponse> {
-    let url = format!("{}/client/register", oidc_endpoint(region));
+    let region = normalize_region(region)?;
+    let start_url = normalize_start_url(start_url)?;
+    let url = format!("{}/client/register", oidc_endpoint(&region)?);
     let client = build_client(proxy, 30, config.tls_backend)?;
 
     let body = RegisterClientRequest {
@@ -66,7 +118,7 @@ pub async fn register_client(
             "urn:ietf:params:oauth:grant-type:device_code".to_string(),
             "refresh_token".to_string(),
         ],
-        issuer_url: start_url.to_string(),
+        issuer_url: start_url,
     };
 
     let resp = client
@@ -98,13 +150,15 @@ pub async fn start_device_authorization(
     config: &Config,
     proxy: Option<&ProxyConfig>,
 ) -> anyhow::Result<StartDeviceAuthorizationResponse> {
-    let url = format!("{}/device_authorization", oidc_endpoint(region));
+    let region = normalize_region(region)?;
+    let start_url = normalize_start_url(start_url)?;
+    let url = format!("{}/device_authorization", oidc_endpoint(&region)?);
     let client = build_client(proxy, 30, config.tls_backend)?;
 
     let body = StartDeviceAuthorizationRequest {
         client_id: client_id.to_string(),
         client_secret: client_secret.to_string(),
-        start_url: start_url.to_string(),
+        start_url,
     };
 
     let resp = client
@@ -138,7 +192,14 @@ pub async fn poll_token(
     config: &Config,
     proxy: Option<&ProxyConfig>,
 ) -> PollResult {
-    let url = format!("{}/token", oidc_endpoint(region));
+    let region = match normalize_region(region) {
+        Ok(region) => region,
+        Err(error) => return PollResult::Error(error),
+    };
+    let url = match oidc_endpoint(&region) {
+        Ok(endpoint) => format!("{}/token", endpoint),
+        Err(error) => return PollResult::Error(error),
+    };
     let client = match build_client(proxy, 30, config.tls_backend) {
         Ok(c) => c,
         Err(e) => return PollResult::Error(e),
@@ -181,7 +242,7 @@ pub async fn poll_token(
     if let Ok(err_resp) = serde_json::from_str::<OidcErrorResponse>(&body_text) {
         match err_resp.error.as_str() {
             "authorization_pending" => return PollResult::Pending,
-            "slow_down" => return PollResult::Pending,
+            "slow_down" => return PollResult::SlowDown,
             "expired_token" => return PollResult::Expired,
             "access_denied" => return PollResult::Error(anyhow::anyhow!("用户拒绝了授权请求")),
             _ => {}
@@ -189,4 +250,46 @@ pub async fn poll_token(
     }
 
     PollResult::Error(anyhow::anyhow!("轮询令牌失败 {}: {}", status, body_text))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BUILDER_ID_START_URL, normalize_region, normalize_start_url};
+
+    #[test]
+    fn normalize_region_accepts_aws_regions_and_trims_input() {
+        assert_eq!(normalize_region(" US-EAST-1 ").unwrap(), "us-east-1");
+        assert_eq!(normalize_region("us-gov-west-1").unwrap(), "us-gov-west-1");
+    }
+
+    #[test]
+    fn normalize_region_rejects_host_injection() {
+        for value in ["", "us-east-1.amazonaws.com", "us-east-1/evil", "../us-east-1"] {
+            assert!(normalize_region(value).is_err(), "应拒绝 {value:?}");
+        }
+    }
+
+    #[test]
+    fn normalize_start_url_accepts_aws_portal_and_removes_trailing_slash() {
+        assert_eq!(
+            normalize_start_url(" https://d-1234567890.awsapps.com/start/ ").unwrap(),
+            "https://d-1234567890.awsapps.com/start"
+        );
+        assert_eq!(
+            normalize_start_url(BUILDER_ID_START_URL).unwrap(),
+            BUILDER_ID_START_URL
+        );
+    }
+
+    #[test]
+    fn normalize_start_url_rejects_untrusted_or_ambiguous_urls() {
+        for value in [
+            "http://view.awsapps.com/start",
+            "https://view.awsapps.com.evil.example/start",
+            "https://view.awsapps.com/start?next=evil",
+            "https://user@view.awsapps.com/start",
+        ] {
+            assert!(normalize_start_url(value).is_err(), "应拒绝 {value:?}");
+        }
+    }
 }
