@@ -847,24 +847,8 @@ export function CredentialCard({
       </label>
 
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-sm font-medium leading-5">
+        <div className="flex min-w-0 items-center gap-1.5 text-sm font-medium leading-5">
           <CredentialLabel id={credential.id} email={credential.email} />
-          <Badge
-            variant="outline"
-            className="shrink-0 px-1.5 py-0 text-[10px]"
-            title={`凭据类型：${authLabel}`}
-          >
-            凭据 · {authLabel}
-          </Badge>
-          {subscriptionBadge ?? (
-            <Badge
-              variant="secondary"
-              className="shrink-0 px-1.5 py-0 text-[10px]"
-              title="订阅类型：未知"
-            >
-              订阅 · 未知
-            </Badge>
-          )}
         </div>
         <div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden [&>*]:shrink-0">
           {statusBadges}
@@ -887,6 +871,27 @@ export function CredentialCard({
           )}
         </div>
         <MetadataSummary credential={credential} scrollable />
+      </div>
+
+      <div className="hidden w-24 shrink-0 flex-col items-center justify-center gap-1 md:flex">
+        <div className="flex h-5 items-center justify-center">
+          {subscriptionBadge ?? (
+            <Badge
+              variant="secondary"
+              className="px-1.5 py-0 text-[10px]"
+              title="订阅等级：未知"
+            >
+              未知
+            </Badge>
+          )}
+        </div>
+        <Badge
+          variant="outline"
+          className="max-w-24 px-1.5 py-0 text-[10px]"
+          title={`凭据来源：${authLabel}`}
+        >
+          <span className="truncate">{authLabel}</span>
+        </Badge>
       </div>
 
       <div className="hidden shrink-0 items-center gap-6 lg:flex">
