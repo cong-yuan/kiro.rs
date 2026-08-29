@@ -409,7 +409,7 @@ export interface StartIdcLoginResponse {
 }
 
 export type PollIdcLoginResponse =
-  | { status: 'pending' }
+  | { status: 'pending'; pollInterval?: number }
   | { status: 'success'; credentialId: number }
   | { status: 'expired' }
 

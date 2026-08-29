@@ -254,7 +254,7 @@ export function ReloginDialog({ open, onOpenChange, credential }: ReloginDialogP
       try {
         const result = await pollIdcRelogin(credential.id, sessionId)
         if (result.status === 'pending') {
-          scheduleIdcPoll(sessionId, interval)
+          scheduleIdcPoll(sessionId, result.pollInterval ?? interval)
         } else if (result.status === 'success') {
           setStep('done')
           invalidate()

@@ -988,7 +988,10 @@ pub struct StartIdcLoginResponse {
 #[serde(rename_all = "camelCase", tag = "status")]
 pub enum PollIdcLoginResponse {
     #[serde(rename = "pending")]
-    Pending,
+    Pending {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        poll_interval: Option<i64>,
+    },
     #[serde(rename = "success")]
     Success { credential_id: u64 },
     #[serde(rename = "expired")]

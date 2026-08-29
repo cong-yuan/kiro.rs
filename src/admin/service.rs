@@ -3141,7 +3141,11 @@ impl AdminService {
         };
 
         match outcome {
-            PollOutcome::Pending => return Ok(PollIdcLoginResponse::Pending),
+            PollOutcome::Pending => {
+                return Ok(PollIdcLoginResponse::Pending {
+                    poll_interval: None,
+                });
+            }
             PollOutcome::Expired => {
                 self.social_sessions.lock().remove(session_id);
                 return Ok(PollIdcLoginResponse::Expired);
@@ -3342,6 +3346,10 @@ impl AdminService {
         mut cred_template: KiroCredentials,
         relogin_target_id: Option<u64>,
     ) -> Result<StartIdcLoginResponse, AdminServiceError> {
+        let region = idc::normalize_region(&region)
+            .map_err(|error| AdminServiceError::InvalidCredential(error.to_string()))?;
+        let start_url = idc::normalize_start_url(&start_url)
+            .map_err(|error| AdminServiceError::InvalidCredential(error.to_string()))?;
         let config = self.token_manager.config();
 
         // 1. 注册 OIDC 客户端
@@ -3447,7 +3455,26 @@ impl AdminService {
         )
         .await
         {
-            idc::PollResult::Pending => Ok(PollIdcLoginResponse::Pending),
+            idc::PollResult::Pending => Ok(PollIdcLoginResponse::Pending {
+                poll_interval: None,
+            }),
+            idc::PollResult::SlowDown => {
+                let poll_interval = {
+                    let mut sessions = self.idc_sessions.lock();
+                    let session = sessions
+                        .get_mut(session_id)
+                        .ok_or(AdminServiceError::NotFound { id: 0 })?;
+                    session.poll_interval = session.poll_interval.saturating_add(5);
+                    session.poll_interval
+                };
+                tracing::debug!(
+                    "AWS IdC 要求降低轮询频率，后续间隔调整为 {} 秒",
+                    poll_interval
+                );
+                Ok(PollIdcLoginResponse::Pending {
+                    poll_interval: Some(poll_interval),
+                })
+            }
             idc::PollResult::Expired => {
                 self.idc_sessions.lock().remove(session_id);
                 Ok(PollIdcLoginResponse::Expired)
