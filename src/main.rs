@@ -99,7 +99,8 @@ async fn main() {
         .filter(|url| !url.trim().is_empty())
         .map(|url| {
             let mut proxy = http_client::ProxyConfig::new(url);
-            if let (Some(username), Some(password)) = (&config.proxy_username, &config.proxy_password)
+            if let (Some(username), Some(password)) =
+                (&config.proxy_username, &config.proxy_password)
             {
                 proxy = proxy.with_auth(username, password);
             }
@@ -222,15 +223,30 @@ async fn main() {
         }
     }
 
-    // 请求链路追踪存储（SQLite，traces.db）。失败不致命：trace 不可用但服务正常。
-    let trace_store: Option<admin::SharedTraceStore> = match admin::TraceStore::open(
+    // 请求链路追踪存储：默认 SQLite；配置 traceDatabaseUrl 时使用 PostgreSQL。
+    // 初始化失败不致命：trace 不可用但模型 API 继续运行。
+    let trace_store: Option<admin::SharedTraceStore> = match admin::TraceStore::open_configured(
         cache_dir.join("traces.db"),
+        config.trace_database_url.as_deref(),
         config.trace_enabled,
         config.trace_retention_days,
-    ) {
-        Ok(s) => Some(std::sync::Arc::new(s)),
-        Err(e) => {
-            tracing::warn!("打开 traces.db 失败，请求链路追踪不可用: {}", e);
+    )
+    .await
+    {
+        Ok(store) => {
+            if config
+                .trace_database_url
+                .as_deref()
+                .is_some_and(|url| !url.trim().is_empty())
+            {
+                tracing::info!("请求链路追踪已使用 PostgreSQL 后端");
+            } else {
+                tracing::info!("请求链路追踪已使用 SQLite 后端");
+            }
+            Some(std::sync::Arc::new(store))
+        }
+        Err(error) => {
+            tracing::warn!("初始化 Trace 数据库失败，请求链路追踪不可用: {}", error);
             None
         }
     };
@@ -245,7 +261,7 @@ async fn main() {
             loop {
                 recorder.cleanup_old_logs();
                 if let Some(ts) = &trace_store {
-                    ts.cleanup();
+                    ts.cleanup().await;
                 }
                 tokio::time::sleep(day).await;
             }

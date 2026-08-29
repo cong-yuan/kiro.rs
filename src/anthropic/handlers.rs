@@ -2232,8 +2232,8 @@ mod tests {
         assert_eq!(overview.today_credits, 0.5);
     }
 
-    #[test]
-    fn tracer_renumbers_attempts_across_provider_rounds_before_persisting() {
+    #[tokio::test]
+    async fn tracer_renumbers_attempts_across_provider_rounds_before_persisting() {
         use crate::admin::trace_db::{TraceQuery, TraceStore};
 
         let store = std::sync::Arc::new(TraceStore::open_in_memory().unwrap());
@@ -2281,11 +2281,13 @@ mod tests {
             },
         );
 
-        let (records, total) = store.query_paged(&TraceQuery {
-            model: Some("gpt-5.6-luna".to_string()),
-            limit: 10,
-            ..Default::default()
-        });
+        let (records, total) = store
+            .query_paged(&TraceQuery {
+                model: Some("gpt-5.6-luna".to_string()),
+                limit: 10,
+                ..Default::default()
+            })
+            .await;
         assert_eq!(total, 1);
         assert_eq!(records.len(), 1);
         let record = &records[0];
@@ -2335,8 +2337,8 @@ mod tests {
         assert_eq!(*tracer.first_token_at.lock(), first);
     }
 
-    #[test]
-    fn tracer_uses_terminal_mcp_attempt_for_failure_fields() {
+    #[tokio::test]
+    async fn tracer_uses_terminal_mcp_attempt_for_failure_fields() {
         use crate::admin::trace_db::{TraceQuery, TraceStore};
 
         let store = std::sync::Arc::new(TraceStore::open_in_memory().unwrap());
@@ -2374,10 +2376,12 @@ mod tests {
             TraceUsage::zero(),
         );
 
-        let (records, total) = store.query_paged(&TraceQuery {
-            limit: 10,
-            ..Default::default()
-        });
+        let (records, total) = store
+            .query_paged(&TraceQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .await;
         assert_eq!(total, 1);
         let record = &records[0];
         assert_eq!(record.final_credential_id, 29);
