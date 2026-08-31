@@ -39,6 +39,7 @@ import type {
   GitHubRateLimitInfo,
   UpdateAdminKeyRequest,
   CredentialMetadataSchemaConfig,
+  PromptFilterConfig,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -591,6 +592,18 @@ export async function setCacheMeteringConfig(
   patch: Partial<CacheMeteringConfig>,
 ): Promise<CacheMeteringConfig> {
   const { data } = await api.put<CacheMeteringConfig>('/config/cache-metering', patch)
+  return data
+}
+
+export async function getPromptFilterConfig(): Promise<PromptFilterConfig> {
+  const { data } = await api.get<PromptFilterConfig>('/config/prompt-filter')
+  return data
+}
+
+export async function setPromptFilterConfig(
+  config: PromptFilterConfig,
+): Promise<PromptFilterConfig> {
+  const { data } = await api.put<PromptFilterConfig>('/config/prompt-filter', config)
   return data
 }
 

@@ -24,8 +24,8 @@ use super::{
         ClientKeyItem, ClientKeysResponse, CompleteSocialLoginRequest, CreateClientKeyRequest,
         CreateClientKeyResponse, CredentialMetadataSchemaConfig, CredentialTestRequest,
         ModelTestRequest, SetAccountRpmLimitConfigRequest, SetAccountThrottleConfigRequest,
-        SetCacheMeteringConfigRequest, SetCustomModelsRequest, SetDisabledRequest,
-        SetGlobalProxyRequest, SetSessionAffinityConfigRequest,
+        PromptFilterConfigResponse, SetCacheMeteringConfigRequest, SetCustomModelsRequest,
+        SetDisabledRequest, SetGlobalProxyRequest, SetSessionAffinityConfigRequest,
         SetLoadBalancingModeRequest, SetLogGovernanceConfigRequest, SetPriorityRequest,
         SetSelfHealConfigRequest, SetUpdateConfigRequest, StartIdcLoginRequest,
         StartSocialLoginRequest, SuccessResponse, UpdateAdminKeyRequest, UpdateClientKeyRequest,
@@ -627,6 +627,22 @@ pub async fn set_self_heal_config(
     match state.service.set_self_heal_config(payload) {
         Ok(response) => Json(response).into_response(),
         Err(e) => (e.status_code(), Json(e.into_response())).into_response(),
+    }
+}
+
+/// GET /api/admin/config/prompt-filter
+pub async fn get_prompt_filter_config(State(state): State<AdminState>) -> impl IntoResponse {
+    Json(state.service.get_prompt_filter_config())
+}
+
+/// PUT /api/admin/config/prompt-filter
+pub async fn set_prompt_filter_config(
+    State(state): State<AdminState>,
+    Json(payload): Json<PromptFilterConfigResponse>,
+) -> impl IntoResponse {
+    match state.service.set_prompt_filter_config(payload) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => (error.status_code(), Json(error.into_response())).into_response(),
     }
 }
 

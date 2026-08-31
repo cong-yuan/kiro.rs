@@ -11,5 +11,9 @@
   "modelCacheTtlSecs": 3600,
   "traceEnabled": true,
   "traceRetentionDays": 7,
-  "usageLogRetentionDays": 31
+  "usageLogRetentionDays": 31,
+  "filterClaudeCode": false,
+  "filterEnvNoise": false,
+  "filterStripBoundaries": false,
+  "promptFilterRules": []
 }

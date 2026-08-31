@@ -173,6 +173,12 @@ async fn main() {
 
     // 初始化自定义模型注册表（启动时装载一次，运行期只读）
     model::custom_models::init(config.custom_models.clone());
+    model::prompt_filter::init(model::prompt_filter::PromptFilterConfig {
+        filter_claude_code: config.filter_claude_code,
+        filter_env_noise: config.filter_env_noise,
+        filter_strip_boundaries: config.filter_strip_boundaries,
+        rules: config.prompt_filter_rules.clone(),
+    });
 
     // 初始化 count_tokens 配置
     token::init_config(token::CountTokensConfig {
