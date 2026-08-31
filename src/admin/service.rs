@@ -45,7 +45,8 @@ use super::types::{
     CustomModelsConfigResponse, EnableOverageAllResult, ExportedAccount, ExportedCredentials,
     GitHubRateLimitInfo, ImageUpdateResponse, LoadBalancingModeResponse,
     LogGovernanceConfigResponse, ModelSelectionMode, ModelTestRequest, ModelTestResponse,
-    PollIdcLoginResponse, ProxyCheckAllResponse, ProxyCheckResponse, ProxyPoolEntry,
+    PollIdcLoginResponse, PromptFilterConfigResponse, ProxyCheckAllResponse, ProxyCheckResponse,
+    ProxyPoolEntry,
     ProxyPoolResponse, QuotaExceededResult, SelfHealConfigResponse,
     SetAccountRpmLimitConfigRequest, SetAccountThrottleConfigRequest, SetCustomModelsRequest,
     SetLoadBalancingModeRequest, SetLogGovernanceConfigRequest, SetSelfHealConfigRequest,
@@ -2579,6 +2580,44 @@ impl AdminService {
             .map_err(|e| AdminServiceError::InvalidCredential(e.to_string()))?;
 
         Ok(self.get_self_heal_config())
+    }
+
+    /// 读取 System Prompt 过滤配置。
+    pub fn get_prompt_filter_config(&self) -> PromptFilterConfigResponse {
+        let config = crate::model::prompt_filter::current();
+        PromptFilterConfigResponse {
+            filter_claude_code: config.filter_claude_code,
+            filter_env_noise: config.filter_env_noise,
+            filter_strip_boundaries: config.filter_strip_boundaries,
+            rules: config.rules,
+        }
+    }
+
+    /// 整体替换 System Prompt 过滤配置：先校验并持久化，再热更新运行时。
+    pub fn set_prompt_filter_config(
+        &self,
+        req: PromptFilterConfigResponse,
+    ) -> Result<PromptFilterConfigResponse, AdminServiceError> {
+        let runtime = crate::model::prompt_filter::PromptFilterConfig {
+            filter_claude_code: req.filter_claude_code,
+            filter_env_noise: req.filter_env_noise,
+            filter_strip_boundaries: req.filter_strip_boundaries,
+            rules: req.rules,
+        };
+        crate::model::prompt_filter::validate(&runtime)
+            .map_err(AdminServiceError::InvalidCredential)?;
+
+        let persisted = runtime.clone();
+        self.token_manager
+            .update_config_file(move |config| {
+                config.filter_claude_code = persisted.filter_claude_code;
+                config.filter_env_noise = persisted.filter_env_noise;
+                config.filter_strip_boundaries = persisted.filter_strip_boundaries;
+                config.prompt_filter_rules = persisted.rules;
+            })
+            .map_err(|error| AdminServiceError::InternalError(error.to_string()))?;
+        crate::model::prompt_filter::init(runtime);
+        Ok(self.get_prompt_filter_config())
     }
 
     /// 读取日志治理配置（trace 开关 / trace 保留天数 / usage 保留天数）

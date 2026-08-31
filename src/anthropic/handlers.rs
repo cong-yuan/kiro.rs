@@ -610,6 +610,8 @@ pub async fn post_messages(
     Extension(key_ctx): Extension<KeyContext>,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
+    crate::model::prompt_filter::apply_to_system(&mut payload.system);
+
     // Count the image budget on inbound to provide precise diagnostics for later context-window-full errors
     let img_stats = count_image_budget(&payload);
     tracing::info!(
@@ -1581,8 +1583,10 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
 /// 计算消息的 token 数量
 pub async fn count_tokens(
     Extension(_key_ctx): Extension<KeyContext>,
-    JsonExtractor(payload): JsonExtractor<CountTokensRequest>,
+    JsonExtractor(mut payload): JsonExtractor<CountTokensRequest>,
 ) -> impl IntoResponse {
+    crate::model::prompt_filter::apply_to_system(&mut payload.system);
+
     tracing::info!(
         model = %payload.model,
         message_count = %payload.messages.len(),
@@ -1611,6 +1615,8 @@ pub async fn post_messages_cc(
     Extension(key_ctx): Extension<KeyContext>,
     JsonExtractor(mut payload): JsonExtractor<MessagesRequest>,
 ) -> Response {
+    crate::model::prompt_filter::apply_to_system(&mut payload.system);
+
     tracing::info!(
         model = %payload.model,
         max_tokens = %payload.max_tokens,

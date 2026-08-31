@@ -344,6 +344,22 @@ export interface SetGlobalProxyRequest {
   proxyPassword?: string | null
 }
 
+export interface PromptFilterRule {
+  id: string
+  name: string
+  type: 'regex' | 'lines-containing'
+  match: string
+  replace: string
+  enabled: boolean
+}
+
+export interface PromptFilterConfig {
+  filterClaudeCode: boolean
+  filterEnvNoise: boolean
+  filterStripBoundaries: boolean
+  rules: PromptFilterRule[]
+}
+
 // 在线更新配置
 export interface UpdateConfigResponse {
   /** 上一次更新前正在运行的版本号（带 v 前缀）；存在时可调用回退接口 */

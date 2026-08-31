@@ -4,6 +4,7 @@ import {
   Globe,
   ScrollText,
   PackageOpen,
+  MessageSquareText,
   ShieldCheck,
   SlidersHorizontal,
   Tags,
@@ -19,6 +20,7 @@ import { SystemSection } from '@/components/settings/system-section'
 import { SecuritySection } from '@/components/settings/security-section'
 import { MetadataSection } from '@/components/settings/metadata-section'
 import { ModelsSection } from '@/components/settings/models-section'
+import { PromptFilterSection } from '@/components/settings/prompt-filter-section'
 
 /**
  * 设置页 —— 把此前散在三处的 7 个配置端点收拢到一处。
@@ -31,7 +33,7 @@ import { ModelsSection } from '@/components/settings/models-section'
  * 一次点击就该切换完；但参数（冷却时长、连续上限、保留天数这些）全部移到这里 ——
  * 下拉菜单里塞数字输入框本来就不是它该干的事。
  */
-type SectionKey = 'dispatch' | 'metadata' | 'network' | 'log' | 'models' | 'system' | 'security'
+type SectionKey = 'dispatch' | 'metadata' | 'network' | 'log' | 'models' | 'prompt' | 'system' | 'security'
 
 const SECTIONS: {
   key: SectionKey
@@ -62,6 +64,11 @@ const SECTIONS: {
     key: 'models',
     label: '模型',
     icon: <Cpu className="h-4 w-4" />,
+  },
+  {
+    key: 'prompt',
+    label: '提示词',
+    icon: <MessageSquareText className="h-4 w-4" />,
   },
   {
     key: 'system',
@@ -122,6 +129,7 @@ export function SettingsPage() {
             {active === 'models' && <ModelsSection />}
             {active === 'network' && <NetworkSection />}
             {active === 'log' && <LogSection />}
+            {active === 'prompt' && <PromptFilterSection />}
             {active === 'system' && <SystemSection />}
             {active === 'security' && <SecuritySection />}
           </CardContent>

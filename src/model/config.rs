@@ -67,6 +67,22 @@ pub struct CustomModel {
     pub owned_by: Option<String>,
 }
 
+/// 单条 System Prompt 自定义过滤规则。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptFilterRule {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub rule_type: String,
+    #[serde(rename = "match")]
+    pub match_value: String,
+    #[serde(default)]
+    pub replace: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 /// KNA 应用配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -264,6 +280,16 @@ pub struct Config {
     #[serde(default = "default_usage_log_retention_days")]
     pub usage_log_retention_days: u32,
 
+    /// System Prompt 过滤（均默认关闭，保持向后兼容）。
+    #[serde(default)]
+    pub filter_claude_code: bool,
+    #[serde(default)]
+    pub filter_env_noise: bool,
+    #[serde(default)]
+    pub filter_strip_boundaries: bool,
+    #[serde(default)]
+    pub prompt_filter_rules: Vec<PromptFilterRule>,
+
     /// 端点特定的配置
     ///
     /// 键为端点名（如 "ide" / "cli"），值为该端点自由定义的参数对象。
@@ -431,6 +457,10 @@ impl Default for Config {
             trace_retention_days: default_trace_retention_days(),
             trace_database_url: None,
             usage_log_retention_days: default_usage_log_retention_days(),
+            filter_claude_code: false,
+            filter_env_noise: false,
+            filter_strip_boundaries: false,
+            prompt_filter_rules: Vec::new(),
             endpoints: HashMap::new(),
             custom_models: Vec::new(),
             credential_metadata_schema: None,

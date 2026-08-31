@@ -39,6 +39,7 @@ import type {
   GitHubRateLimitInfo,
   UpdateAdminKeyRequest,
   CredentialMetadataSchemaConfig,
+  PromptFilterConfig,
 } from '@/types/api'
 
 // 创建 axios 实例
@@ -550,6 +551,18 @@ export async function setLogGovernanceConfig(
   patch: Partial<LogGovernanceConfig>,
 ): Promise<LogGovernanceConfig> {
   const { data } = await api.put<LogGovernanceConfig>('/config/log-governance', patch)
+  return data
+}
+
+export async function getPromptFilterConfig(): Promise<PromptFilterConfig> {
+  const { data } = await api.get<PromptFilterConfig>('/config/prompt-filter')
+  return data
+}
+
+export async function setPromptFilterConfig(
+  config: PromptFilterConfig,
+): Promise<PromptFilterConfig> {
+  const { data } = await api.put<PromptFilterConfig>('/config/prompt-filter', config)
   return data
 }
 

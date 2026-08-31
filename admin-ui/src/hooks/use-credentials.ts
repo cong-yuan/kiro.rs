@@ -24,6 +24,8 @@ import {
   setSelfHealConfig,
   getLogGovernanceConfig,
   setLogGovernanceConfig,
+  getPromptFilterConfig,
+  setPromptFilterConfig,
   getGlobalProxy,
   setGlobalProxy,
   getCustomModels,
@@ -43,6 +45,7 @@ import type {
   UpdateCredentialRequest,
   UpdateRefreshTokenRequest,
   CredentialMetadataSchemaConfig,
+  PromptFilterConfig,
 } from '@/types/api'
 
 // 查询凭据列表
@@ -331,6 +334,23 @@ export function useSetLogGovernanceConfig() {
     mutationFn: setLogGovernanceConfig,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['logGovernanceConfig'] })
+    },
+  })
+}
+
+export function usePromptFilterConfig() {
+  return useQuery({
+    queryKey: ['prompt-filter'],
+    queryFn: getPromptFilterConfig,
+  })
+}
+
+export function useSetPromptFilterConfig() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (config: PromptFilterConfig) => setPromptFilterConfig(config),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['prompt-filter'] })
     },
   })
 }

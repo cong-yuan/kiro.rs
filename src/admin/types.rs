@@ -2,6 +2,7 @@
 
 use crate::admin::proxy_pool::ProxyHealth;
 use crate::kiro::model::credentials::CredentialMetadata;
+use crate::model::config::PromptFilterRule;
 use serde::{Deserialize, Serialize};
 
 // ============ 凭据状态 ============
@@ -641,6 +642,17 @@ pub struct SetLogGovernanceConfigRequest {
     /// 用量日志保留天数，1..=365
     #[serde(default)]
     pub usage_log_retention_days: Option<u32>,
+}
+
+/// System Prompt 过滤配置。GET 返回当前值，PUT 整体替换并热更新。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptFilterConfigResponse {
+    pub filter_claude_code: bool,
+    pub filter_env_noise: bool,
+    pub filter_strip_boundaries: bool,
+    #[serde(default)]
+    pub rules: Vec<PromptFilterRule>,
 }
 
 /// 凭据 metadata schema 配置响应/更新请求。

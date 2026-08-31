@@ -48,3 +48,4 @@ tar = "0.4"         # tar 解析（在线更新）
 zip = { version = "2", default-features = false, features = ["deflate"] }  # zip 解压（Windows 在线更新）
 rusqlite = { version = "0.32", features = ["bundled"] }  # 请求链路追踪 SQLite 后端（自带 SQLite 源码）
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio-rustls", "postgres"] }  # 请求链路追踪 PostgreSQL 后端
+regex = "=1.12.2"

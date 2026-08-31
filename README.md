@@ -376,6 +376,10 @@ Admin API 鉴权同样支持：
 | `traceRetentionDays` | `7` | trace 保留天数 |
 | `traceDatabaseUrl` | 无 | Trace PostgreSQL URL；省略时使用本地 SQLite `traces.db` |
 | `usageLogRetentionDays` | `31` | `usage_log.*.jsonl` 保留天数 |
+| `filterClaudeCode` | `false` | 识别 Claude Code 内置 System Prompt（至少命中两个特征）并替换为精简后端提示词 |
+| `filterEnvNoise` | `false` | 移除 Environment、auto memory、gitStatus 等环境噪声 |
+| `filterStripBoundaries` | `false` | 移除 `--- SYSTEM PROMPT ---` 边界标记 |
+| `promptFilterRules` | `[]` | 自定义 `regex` 替换或 `lines-containing` 按行删除规则 |
 | `countTokensApiUrl` | 无 | 外部 count_tokens API 地址 |
 | `countTokensApiKey` | 无 | 外部 count_tokens API Key |
 | `countTokensAuthType` | `x-api-key` | `x-api-key` 或 `bearer` |
@@ -384,6 +388,17 @@ Admin API 鉴权同样支持：
 | `updateAutoApplyTime` | `03:00` | 自动更新时间，本地时区 `HH:MM` |
 
 非空的 `config.apiKey` 每次启动都会同步为不可删除、可轮换的系统 Key `id=0`。手动修改配置后，旧系统 Key 立即失效，新值自动启用；已有名称、描述、分组和累计统计会保留。Admin 面板新建或轮换的客户端 Key 统一以 `sk-` 开头，但请求鉴权不会对任何已存储 Key 强制检查前缀。`adminApiKey` 独立用于 Admin UI / Admin API 登录，不参与 `/v1` 业务流量鉴权。
+
+### System Prompt 过滤
+
+过滤设置可在 Admin UI 的「设置 → 提示词」中热更新，无需重启。它会统一作用于 Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 和 `count_tokens`，确保实际发往 Kiro 的内容与 token / prompt cache 计量一致。
+
+自定义规则支持：
+
+- `regex`：Rust 正则全局替换；`replace` 为空时删除匹配内容。
+- `lines-containing`：大小写不敏感地删除包含指定文本的整行。
+
+所有过滤默认关闭以保持向后兼容。Admin API 为 `GET/PUT /api/admin/config/prompt-filter`；保存时会先校验规则数量、字段长度及正则语法，再持久化到 `config.json` 并原子热更新。
 
 ### PostgreSQL 请求日志
 
