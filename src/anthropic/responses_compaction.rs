@@ -16,7 +16,7 @@ use axum::{
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::kiro::model::requests::kiro::KiroRequest;
+use crate::kiro::model::requests::kiro::{InferenceConfig, KiroRequest};
 use crate::token;
 
 use super::super::converter::{ConversionPurpose, convert_request_with_purpose};
@@ -224,6 +224,9 @@ async fn run_attempt(
     let kiro_request = KiroRequest {
         conversation_state: conversion.conversation_state,
         profile_arn: None,
+        inference_config: Some(InferenceConfig {
+            max_tokens: anthropic_req.max_tokens,
+        }),
         additional_model_request_fields: conversion.additional_model_request_fields,
     };
     let request_body = serde_json::to_string(&kiro_request).map_err(|error| {

@@ -25,7 +25,7 @@ use crate::kiro::model::events::{Event, strip_tool_use_xml_leaks};
 use crate::kiro::model::requests::conversation::{
     ConversationState, CurrentMessage, UserInputMessage,
 };
-use crate::kiro::model::requests::kiro::KiroRequest;
+use crate::kiro::model::requests::kiro::{InferenceConfig, KiroRequest};
 use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::kiro::provider::KiroProvider;
 use crate::kiro::token_manager::{
@@ -1162,6 +1162,7 @@ impl AdminService {
         let body = serde_json::to_string(&KiroRequest {
             conversation_state,
             profile_arn: None,
+            inference_config: Some(InferenceConfig { max_tokens: 64 }),
             additional_model_request_fields: None,
         })
         .map_err(|error| AdminServiceError::InternalError(error.to_string()))?;
@@ -1171,7 +1172,7 @@ impl AdminService {
             tokio::time::timeout(std::time::Duration::from_secs(90), async {
                 let call = provider.call_api(&body, None, None).await?;
                 let credential_id = call.credential_id;
-                let bytes = call.response.bytes().await?;
+                let bytes = call.into_bytes().await?;
                 Ok::<_, anyhow::Error>((credential_id, bytes))
             })
             .await

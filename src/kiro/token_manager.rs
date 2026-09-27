@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as TokioMutex, Semaphore};
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1973,14 +1973,25 @@ impl MultiTokenManager {
         model: Option<&str>,
         group: Option<&str>,
     ) -> Option<(u64, KiroCredentials)> {
+        self.select_next_credential_excluding(model, group, &HashSet::new())
+    }
+
+    fn select_next_credential_excluding(
+        &self,
+        model: Option<&str>,
+        group: Option<&str>,
+        excluded_ids: &HashSet<u64>,
+    ) -> Option<(u64, KiroCredentials)> {
         let entries = self.entries.lock();
         let now = Instant::now();
 
-        // 过滤可用凭据
+        // 过滤可用且本请求尚未因上游容量异常失败的凭据
         let available: Vec<_> = entries
             .iter()
             .filter_map(|e| {
-                if !self.entry_available_for_request(e, model, group, now) {
+                if excluded_ids.contains(&e.id)
+                    || !self.entry_available_for_request(e, model, group, now)
+                {
                     return None;
                 }
                 let model_support = self.cached_model_support(e.id, model);
@@ -2037,7 +2048,20 @@ impl MultiTokenManager {
         model: Option<&str>,
         group: Option<&str>,
     ) -> anyhow::Result<CallContext> {
-        self.acquire_context_impl(model, group, None, true)
+        self.acquire_context_impl(model, group, None, true, &HashSet::new())
+            .await
+            .map(|(context, _, _)| context)
+    }
+
+    /// 获取调用上下文，同时跳过本请求内已经报告上游容量异常的凭据。
+    /// 排除状态不写入账号健康度，也不跨请求持久化。
+    pub(crate) async fn acquire_context_excluding(
+        &self,
+        model: Option<&str>,
+        group: Option<&str>,
+        excluded_ids: &HashSet<u64>,
+    ) -> anyhow::Result<CallContext> {
+        self.acquire_context_impl(model, group, None, true, excluded_ids)
             .await
             .map(|(context, _, _)| context)
     }
@@ -2053,7 +2077,19 @@ impl MultiTokenManager {
         group: Option<&str>,
         session: Option<&str>,
     ) -> anyhow::Result<(CallContext, RouteDecision)> {
-        self.acquire_context_impl(model, group, session, true)
+        self.acquire_context_routed_excluding(model, group, session, &HashSet::new())
+            .await
+    }
+
+    /// 带会话粘性地获取上下文，同时跳过本请求内已报告容量异常的凭据。
+    pub(crate) async fn acquire_context_routed_excluding(
+        &self,
+        model: Option<&str>,
+        group: Option<&str>,
+        session: Option<&str>,
+        excluded_ids: &HashSet<u64>,
+    ) -> anyhow::Result<(CallContext, RouteDecision)> {
+        self.acquire_context_impl(model, group, session, true, excluded_ids)
             .await
             .map(|(context, _, route)| (context, route))
     }
@@ -2079,6 +2115,7 @@ impl MultiTokenManager {
         session: Option<&str>,
         model: Option<&str>,
         group: Option<&str>,
+        excluded_ids: &HashSet<u64>,
     ) -> (Option<(u64, KiroCredentials)>, RouteDecision) {
         let Some(session) = session else {
             return (None, RouteDecision::none());
@@ -2100,7 +2137,10 @@ impl MultiTokenManager {
         let pick = entries
             .iter()
             .find(|e| e.id == bound_id)
-            .filter(|e| self.entry_available_for_request(e, model, group, now))
+            .filter(|e| {
+                !excluded_ids.contains(&e.id)
+                    && self.entry_available_for_request(e, model, group, now)
+            })
             .map(|e| (e.id, e.credentials.clone()));
         let outcome = if pick.is_some() {
             StickyOutcome::Hit
@@ -2126,6 +2166,7 @@ impl MultiTokenManager {
         group: Option<&str>,
         session: Option<&str>,
         update_current: bool,
+        excluded_ids: &HashSet<u64>,
     ) -> anyhow::Result<(CallContext, bool, RouteDecision)> {
         let total = self.total_count_in_group(group);
         let max_attempts = (total * MAX_FAILURES_PER_CREDENTIAL as usize).max(1);
@@ -2146,13 +2187,19 @@ impl MultiTokenManager {
                 // 会话粘性优先：绑定凭据仍可用就沿用，保住上游按账号隔离的 prompt cache。
                 // 粘性未命中时两种模式都按当前请求重新选择。priority 模式不能复用 current_id，
                 // 否则高优先级凭据从 RPM/冷却恢复后无法在下一次请求立即回切。
-                let (sticky_pick, route) = self.sticky_candidate(session, model, group);
-                let mut best = sticky_pick.or_else(|| self.select_next_credential(model, group));
+                let (sticky_pick, route) =
+                    self.sticky_candidate(session, model, group, excluded_ids);
+                let mut best = sticky_pick.or_else(|| {
+                    self.select_next_credential_excluding(model, group, excluded_ids)
+                });
 
-                // 没有可用凭据：如果是"自动禁用导致全灭"，做一次受控自愈
-                // （受冷却间隔与连续轮数上限约束，避免持续 403 死循环）。
-                if best.is_none() && self.try_self_heal(model, group) {
-                    best = self.select_next_credential(model, group);
+                // 没有可用凭据：仅当本请求没有临时排除账号时尝试受控自愈。
+                // 容量异常不是账号失效，不能借此复活或重复命中已尝试账号。
+                if best.is_none()
+                    && excluded_ids.is_empty()
+                    && self.try_self_heal(model, group)
+                {
+                    best = self.select_next_credential_excluding(model, group, excluded_ids);
                 }
 
                 let (id, credentials) = if let Some((new_id, new_creds)) = best {
@@ -3746,7 +3793,9 @@ impl MultiTokenManager {
     pub async fn get_available_models_for_current(
         &self,
     ) -> anyhow::Result<(u64, ListAvailableModelsResponse, bool)> {
-        let (context, is_balanced, _) = self.acquire_context_impl(None, None, None, false).await?;
+        let (context, is_balanced, _) = self
+            .acquire_context_impl(None, None, None, false, &HashSet::new())
+            .await?;
         let id = context.id;
         let response = self.refresh_model_cache_for(id, true).await?;
         Ok((id, response, is_balanced))
@@ -6123,7 +6172,7 @@ mod tests {
         manager.report_success(1);
 
         let (context, is_balanced, _) = manager
-            .acquire_context_impl(None, None, None, false)
+            .acquire_context_impl(None, None, None, false, &HashSet::new())
             .await
             .unwrap();
 
@@ -7295,6 +7344,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_request_local_exclusion_rotates_then_next_request_switches_back() {
+        let mut first = grouped_cred("first", &[]);
+        first.priority = 0;
+        let mut second = grouped_cred("second", &[]);
+        second.priority = 10;
+        let manager =
+            MultiTokenManager::new(Config::default(), vec![first, second], None, None, false)
+                .unwrap();
+
+        let excluded = HashSet::from([1]);
+        let fallback = manager
+            .acquire_context_excluding(None, None, &excluded)
+            .await
+            .unwrap();
+        assert_eq!(fallback.id, 2);
+
+        let next_request = manager.acquire_context(None, None).await.unwrap();
+        assert_eq!(next_request.id, 1);
+    }
+
+    #[tokio::test]
     async fn test_priority_mode_selects_smallest_priority_in_request_group() {
         let mut other_group = grouped_cred("other", &["g2"]);
         other_group.priority = 0;
@@ -7425,6 +7495,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(route.sticky_outcome, StickyOutcome::Off);
+    }
+
+    #[tokio::test]
+    async fn test_session_affinity_respects_request_local_capacity_exclusion() {
+        let mut first = grouped_cred("first", &[]);
+        first.priority = 0;
+        let mut second = grouped_cred("second", &[]);
+        second.priority = 10;
+        let manager =
+            MultiTokenManager::new(Config::default(), vec![first, second], None, None, false)
+                .unwrap();
+
+        manager.bind_session("capacity-session", 1);
+        let excluded = HashSet::from([1]);
+        let (ctx, route) = manager
+            .acquire_context_routed_excluding(
+                None,
+                None,
+                Some("capacity-session"),
+                &excluded,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(ctx.id, 2);
+        assert_eq!(route.sticky_outcome, StickyOutcome::MissUnavailable);
+        assert_eq!(route.previous_credential_id, Some(1));
+        assert!(!manager.snapshot().entries[0].disabled);
+
+        let (ctx, route) = manager
+            .acquire_context_routed(None, None, Some("capacity-session"))
+            .await
+            .unwrap();
+        assert_eq!(ctx.id, 1);
+        assert_eq!(route.sticky_outcome, StickyOutcome::Hit);
     }
 
     /// 粘性命中也受 RPM 限制约束：绑定凭据打满时回落，而不是硬等。

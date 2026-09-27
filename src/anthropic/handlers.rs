@@ -12,7 +12,7 @@ use crate::admin::trace_db::{
 use crate::admin::usage_stats::{SharedAggregator, SharedRecorder, UsageRecord};
 use crate::kiro::model::available_models::{TokenLimits, UpstreamModel};
 use crate::kiro::model::events::{Event, TokenUsage};
-use crate::kiro::model::requests::kiro::KiroRequest;
+use crate::kiro::model::requests::kiro::{InferenceConfig, KiroRequest};
 use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::kiro::token_manager::ModelDiscoveryError;
 use crate::token;
@@ -833,6 +833,9 @@ pub async fn post_messages(
     let kiro_request = KiroRequest {
         conversation_state: conversion_result.conversation_state,
         profile_arn: None,
+        inference_config: Some(InferenceConfig {
+            max_tokens: payload.max_tokens,
+        }),
         additional_model_request_fields: conversion_result.additional_model_request_fields,
     };
 
@@ -969,8 +972,8 @@ async fn handle_stream_request(
             return map_provider_error(e);
         }
     };
-    let response = call_result.response;
     let credential_id = call_result.credential_id;
+    let body_stream = call_result.into_byte_stream();
 
     // 创建流处理上下文
     let mut ctx = StreamContext::new_with_thinking(
@@ -986,7 +989,14 @@ async fn handle_stream_request(
     let initial_events = ctx.generate_initial_events();
 
     // 创建 SSE 流
-    let stream = create_sse_stream(response, ctx, initial_events, hook, credential_id, tracer);
+    let stream = create_sse_stream(
+        body_stream,
+        ctx,
+        initial_events,
+        hook,
+        credential_id,
+        tracer,
+    );
 
     // 返回 SSE 响应
     Response::builder()
@@ -1008,7 +1018,7 @@ fn create_ping_sse() -> Bytes {
 
 /// 创建 SSE 事件流
 fn create_sse_stream(
-    response: reqwest::Response,
+    body_stream: crate::kiro::provider::KiroByteStream,
     ctx: StreamContext,
     initial_events: Vec<SseEvent>,
     hook: UsageRecordHook,
@@ -1023,7 +1033,6 @@ fn create_sse_stream(
     );
 
     // 然后处理 Kiro 响应流，同时每25秒发送 ping 保活
-    let body_stream = response.bytes_stream();
     let settlement = StreamSettlement::new(hook, credential_id, tracer, &ctx);
 
     let processing_stream = stream::unfold(
@@ -1325,11 +1334,10 @@ pub(crate) async fn execute_non_stream_request(
             return Err(NonStreamExecutionError::Provider(e));
         }
     };
-    let response = call_result.response;
     let credential_id = call_result.credential_id;
 
-    // 读取响应体
-    let body_bytes = match response.bytes().await {
+    // 读取响应体（包含 provider 为首帧校验预读的前缀）
+    let body_bytes = match call_result.into_bytes().await {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::error!("读取响应体失败: {}", e);
@@ -1888,6 +1896,9 @@ pub async fn post_messages_cc(
     let kiro_request = KiroRequest {
         conversation_state: conversion_result.conversation_state,
         profile_arn: None,
+        inference_config: Some(InferenceConfig {
+            max_tokens: payload.max_tokens,
+        }),
         additional_model_request_fields: conversion_result.additional_model_request_fields,
     };
 
@@ -2022,8 +2033,8 @@ async fn handle_stream_request_buffered(
             return map_provider_error(e);
         }
     };
-    let response = call_result.response;
     let credential_id = call_result.credential_id;
+    let body_stream = call_result.into_byte_stream();
 
     // 创建缓冲流处理上下文
     let mut ctx = BufferedStreamContext::new(
@@ -2036,7 +2047,7 @@ async fn handle_stream_request_buffered(
     ctx.set_cache_usage(cache_usage);
 
     // 创建缓冲 SSE 流
-    let stream = create_buffered_sse_stream(response, ctx, hook, credential_id, tracer);
+    let stream = create_buffered_sse_stream(body_stream, ctx, hook, credential_id, tracer);
 
     // 返回 SSE 响应
     Response::builder()
@@ -2056,14 +2067,12 @@ async fn handle_stream_request_buffered(
 /// 3. 流结束后，用正确的 input_tokens 更正 message_start 事件
 /// 4. 一次性发送所有事件
 fn create_buffered_sse_stream(
-    response: reqwest::Response,
+    body_stream: crate::kiro::provider::KiroByteStream,
     ctx: BufferedStreamContext,
     hook: UsageRecordHook,
     credential_id: u64,
     tracer: std::sync::Arc<RequestTracer>,
 ) -> impl Stream<Item = Result<Bytes, Infallible>> {
-    let body_stream = response.bytes_stream();
-
     stream::unfold(
         (
             body_stream,

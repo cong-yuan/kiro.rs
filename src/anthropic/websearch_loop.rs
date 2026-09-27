@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::admin::trace_db::outcome;
 use crate::kiro::model::events::{Event, MeteringEvent, TokenUsage};
-use crate::kiro::model::requests::kiro::KiroRequest;
+use crate::kiro::model::requests::kiro::{InferenceConfig, KiroRequest};
 use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::kiro::provider::KiroProvider;
 use crate::token;
@@ -241,12 +241,11 @@ fn empty_tool_result_disposition(
 
 /// Buffer-decode one round of the upstream streaming response
 async fn decode_round(
-    response: reqwest::Response,
+    mut body_stream: crate::kiro::provider::KiroByteStream,
     model: &str,
     tool_name_map: &std::collections::HashMap<String, String>,
     tracer: &RequestTracer,
 ) -> RoundOutcome {
-    let mut body_stream = response.bytes_stream();
     let mut decoder = EventStreamDecoder::new();
 
     let mut text = String::new();
@@ -429,6 +428,9 @@ async fn run_round(
     let kiro_request = KiroRequest {
         conversation_state: conversion.conversation_state,
         profile_arn: None,
+        inference_config: Some(InferenceConfig {
+            max_tokens: payload.max_tokens,
+        }),
         additional_model_request_fields: conversion.additional_model_request_fields,
     };
     let request_body = match serde_json::to_string(&kiro_request) {
@@ -472,8 +474,9 @@ async fn run_round(
         }
     };
     let credential_id = call_result.credential_id;
+    let byte_stream = call_result.into_byte_stream();
     let mut outcome = decode_round(
-        call_result.response,
+        byte_stream,
         &payload.model,
         &conversion.tool_name_map,
         tracer,

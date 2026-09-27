@@ -5,11 +5,14 @@
 //! 支持多凭据故障转移和重试
 //! 支持按凭据级 endpoint 切换不同 Kiro API 端点
 
+use bytes::{Bytes, BytesMut};
+use futures::{Stream, StreamExt, stream};
 use reqwest::Client;
 use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 use crate::admin::trace_db::{TraceAttempt, TraceRoute, TraceSink, outcome, truncate_snippet};
 use crate::http_client::{ProxyConfig, build_client};
@@ -17,6 +20,7 @@ use crate::kiro::endpoint::{KiroEndpoint, RequestContext};
 use crate::kiro::error::{UpstreamContextOverflowError, UpstreamRateLimitError};
 use crate::kiro::machine_id;
 use crate::kiro::model::credentials::KiroCredentials;
+use crate::kiro::parser::decoder::EventStreamDecoder;
 use crate::kiro::token_manager::MultiTokenManager;
 use crate::model::config::TlsBackend;
 use parking_lot::Mutex;
@@ -30,6 +34,9 @@ const MAX_RETRIES_PER_CREDENTIAL: usize = 3;
 /// 多账号同时触顶时，过多重试会在账号间连环撞墙、放大限流。故上限取较小值，
 /// 配合 429 专用长退避（见 retry_delay_throttle），被限时尽早返回而非耗尽配额。
 const MAX_TOTAL_RETRIES: usize = 4;
+
+/// 2xx 只表示响应头成功；首个完整 EventStream 帧才表示流真正可用。
+const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// HTTP Client 缓存容量上限（不含常驻的全局代理 client）。
 /// 代理池条目较多时，避免每个不同代理都常驻一个 reqwest::Client 导致内存无界增长。
@@ -83,10 +90,30 @@ impl ClientCache {
     }
 }
 
+pub type KiroByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+
 /// API 调用结果，附带本次实际命中的上游凭据 ID（用于用量统计）
 pub struct KiroCallResult {
-    pub response: reqwest::Response,
+    response: reqwest::Response,
+    prefetched: Bytes,
     pub credential_id: u64,
+}
+
+impl KiroCallResult {
+    /// 返回包含 provider 预读前缀的完整响应字节流。
+    pub fn into_byte_stream(self) -> KiroByteStream {
+        let prefix = stream::once(async move { Ok(self.prefetched) });
+        Box::pin(prefix.chain(self.response.bytes_stream()))
+    }
+
+    /// 读取完整响应体，同时保留 provider 为验证首帧而预读的字节。
+    pub async fn into_bytes(self) -> Result<Bytes, reqwest::Error> {
+        let tail = self.response.bytes().await?;
+        let mut body = BytesMut::with_capacity(self.prefetched.len() + tail.len());
+        body.extend_from_slice(&self.prefetched);
+        body.extend_from_slice(&tail);
+        Ok(body.freeze())
+    }
 }
 
 /// A successful MCP HTTP response whose trace attempt is finalized after body validation.
@@ -96,6 +123,23 @@ struct McpCallResult {
     endpoint: &'static str,
     attempt: usize,
     started_at: Instant,
+}
+
+/// A syntactically valid first EventStream frame that semantically reports an
+/// upstream failure. Kiro commonly returns these errors inside HTTP 200.
+#[derive(Debug, thiserror::Error)]
+#[error("上游 EventStream 异常 {event_type}: {body}")]
+struct FirstFrameUpstreamError {
+    event_type: String,
+    body: String,
+}
+
+impl FirstFrameUpstreamError {
+    fn is_capacity_error(&self) -> bool {
+        let body = self.body.to_ascii_lowercase();
+        body.contains("insufficient_model_capacity")
+            || body.contains("insufficient model capacity")
+    }
 }
 
 /// Kiro API Provider
@@ -151,8 +195,8 @@ impl KiroProvider {
         );
         let tls_backend = token_manager.config().tls_backend;
         // 预热：构建全局代理对应的 Client（作为受保护的常驻条目）
-        let initial_client = build_client(proxy.as_ref(), 720, tls_backend)
-            .expect("创建 HTTP 客户端失败");
+        let initial_client =
+            build_client(proxy.as_ref(), 720, tls_backend).expect("创建 HTTP 客户端失败");
         let client_cache = ClientCache::new(proxy.clone(), initial_client, CLIENT_CACHE_CAP);
 
         Self {
@@ -179,10 +223,7 @@ impl KiroProvider {
     }
 
     /// 根据凭据选择 endpoint 实现
-    fn endpoint_for(
-        &self,
-        credentials: &KiroCredentials,
-    ) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
+    fn endpoint_for(&self, credentials: &KiroCredentials) -> anyhow::Result<Arc<dyn KiroEndpoint>> {
         let name = credentials
             .endpoint
             .as_deref()
@@ -245,7 +286,11 @@ impl KiroProvider {
                     return Err(e);
                 }
                 // 网络/瞬态错误：不标记，下次请求再试；本次按原 profileArn 继续
-                tracing::warn!("凭据 #{} 解析真实 profileArn 失败（按原 profileArn 继续）: {}", ctx.id, e);
+                tracing::warn!(
+                    "凭据 #{} 解析真实 profileArn 失败（按原 profileArn 继续）: {}",
+                    ctx.id,
+                    e
+                );
             }
         }
         Ok(())
@@ -261,7 +306,8 @@ impl KiroProvider {
         sink: Option<&dyn TraceSink>,
         group: Option<&str>,
     ) -> anyhow::Result<KiroCallResult> {
-        self.call_api_with_retry(request_body, false, sink, group).await
+        self.call_api_with_retry(request_body, false, sink, group)
+            .await
     }
 
     /// 使用指定凭据发送一次真实 API 请求，不经过账号池选号或故障转移。
@@ -315,7 +361,8 @@ impl KiroProvider {
         sink: Option<&dyn TraceSink>,
         group: Option<&str>,
     ) -> anyhow::Result<KiroCallResult> {
-        self.call_api_with_retry(request_body, true, sink, group).await
+        self.call_api_with_retry(request_body, true, sink, group)
+            .await
     }
 
     /// 发送 MCP API 请求（WebSearch 等工具调用）
@@ -636,7 +683,11 @@ impl KiroProvider {
                     if !has_available {
                         anyhow::bail!("MCP 请求失败（所有凭据已用尽）: {} {}", status, body);
                     }
-                    last_error = Some(anyhow::anyhow!("MCP 请求失败（账号封禁）: {} {}", status, body));
+                    last_error = Some(anyhow::anyhow!(
+                        "MCP 请求失败（账号封禁）: {} {}",
+                        status,
+                        body
+                    ));
                     continue;
                 }
 
@@ -768,6 +819,8 @@ impl KiroProvider {
         let max_retries = (total_credentials * MAX_RETRIES_PER_CREDENTIAL).min(MAX_TOTAL_RETRIES);
         let mut last_error: Option<anyhow::Error> = None;
         let mut force_refreshed: HashSet<u64> = HashSet::new();
+        // 仅在本请求内排除已返回模型容量不足的凭据，不修改账号健康状态。
+        let mut capacity_failed_credentials: HashSet<u64> = HashSet::new();
         let api_type = if is_stream { "流式" } else { "非流式" };
 
         // 尝试从请求体中提取模型与会话标识
@@ -775,10 +828,15 @@ impl KiroProvider {
 
         for attempt in 0..max_retries {
             let attempt_start = Instant::now();
-            // 获取调用上下文（绑定 index、credentials、token）；同一会话优先沿用上一轮凭据
+            // 获取调用上下文；保留会话粘性，但跳过本请求内已报告容量不足的凭据。
             let mut ctx = match self
                 .token_manager
-                .acquire_context_routed(model.as_deref(), group, session_id.as_deref())
+                .acquire_context_routed_excluding(
+                    model.as_deref(),
+                    group,
+                    session_id.as_deref(),
+                    &capacity_failed_credentials,
+                )
                 .await
             {
                 Ok((c, route)) => {
@@ -797,10 +855,23 @@ impl KiroProvider {
                     c
                 }
                 Err(e) => {
+                    // 所有可用账号都已在本请求内报告容量不足时，保留并返回
+                    // 最后一个真实上游错误，而不是用“无可用凭据”覆盖它。
+                    if !capacity_failed_credentials.is_empty() {
+                        if let Some(error) = last_error.take() {
+                            return Err(error);
+                        }
+                    }
                     if is_rate_limit_error(&e) {
                         Self::emit_attempt(
-                            sink, attempt, 0, "", None, outcome::TRANSIENT,
-                            Some(&e.to_string()), attempt_start,
+                            sink,
+                            attempt,
+                            0,
+                            "",
+                            None,
+                            outcome::TRANSIENT,
+                            Some(&e.to_string()),
+                            attempt_start,
                         );
                         return Err(e);
                     }
@@ -808,8 +879,14 @@ impl KiroProvider {
                         return Err(rate_limit);
                     }
                     Self::emit_attempt(
-                        sink, attempt, 0, "", None, outcome::UNKNOWN,
-                        Some(&e.to_string()), attempt_start,
+                        sink,
+                        attempt,
+                        0,
+                        "",
+                        None,
+                        outcome::UNKNOWN,
+                        Some(&e.to_string()),
+                        attempt_start,
                     );
                     last_error = Some(e);
                     continue;
@@ -838,8 +915,14 @@ impl KiroProvider {
                 Ok(e) => e,
                 Err(e) => {
                     Self::emit_attempt(
-                        sink, attempt, ctx.id, "", None, outcome::UNKNOWN,
-                        Some(&e.to_string()), attempt_start,
+                        sink,
+                        attempt,
+                        ctx.id,
+                        "",
+                        None,
+                        outcome::UNKNOWN,
+                        Some(&e.to_string()),
+                        attempt_start,
                     );
                     last_error = Some(e);
                     self.token_manager
@@ -866,12 +949,13 @@ impl KiroProvider {
                 .client_for(&ctx.credentials)?
                 .post(&url)
                 .body(body)
-                .header("content-type", endpoint.content_type())
-                .header("Connection", "close");
+                .header("content-type", endpoint.content_type());
             let request = endpoint.decorate_api(base, &rctx);
 
             // 打印实际发送的请求头（RUST_LOG=debug 时输出，便于排查问题）
-            let request = request.build().map_err(|e| anyhow::anyhow!("构建请求失败: {}", e))?;
+            let request = request
+                .build()
+                .map_err(|e| anyhow::anyhow!("构建请求失败: {}", e))?;
             if tracing::enabled!(tracing::Level::DEBUG) {
                 for (k, v) in request.headers() {
                     tracing::debug!("  header {}: {}", k, v.to_str().unwrap_or("<binary>"));
@@ -887,20 +971,29 @@ impl KiroProvider {
                         e
                     );
                     Self::emit_attempt(
-                        sink, attempt, ctx.id, endpoint_name, None,
-                        outcome::NETWORK_ERROR, Some(&e.to_string()), attempt_start,
+                        sink,
+                        attempt,
+                        ctx.id,
+                        endpoint_name,
+                        None,
+                        outcome::NETWORK_ERROR,
+                        Some(&e.to_string()),
+                        attempt_start,
                     );
                     // 凭据专属代理故障时，重试同一凭据无意义，应跳过该凭据换下一个。
                     // 没有专属代理时（直连或仅全局代理），切换凭据不解决问题，保持重试。
-                    let has_own_proxy = ctx.credentials.proxy_url.as_deref()
+                    let has_own_proxy = ctx
+                        .credentials
+                        .proxy_url
+                        .as_deref()
                         .map_or(false, |u| !u.trim().is_empty());
                     if has_own_proxy {
-                        tracing::warn!(
-                            "凭据 #{} 有专属代理且网络请求失败，跳过该凭据",
-                            ctx.id
+                        tracing::warn!("凭据 #{} 有专属代理且网络请求失败，跳过该凭据", ctx.id);
+                        self.token_manager.report_failure_for_request(
+                            ctx.id,
+                            model.as_deref(),
+                            group,
                         );
-                        self.token_manager
-                            .report_failure_for_request(ctx.id, model.as_deref(), group);
                     }
 
                     last_error = Some(e.into());
@@ -915,11 +1008,19 @@ impl KiroProvider {
             let rate_limit_error = (status.as_u16() == 429)
                 .then(|| UpstreamRateLimitError::from_headers(response.headers()));
 
-            // 成功响应
+            // 2xx 只确认响应头；首个完整 EventStream 帧前失败仍应进入重试链路。
             if status.is_success() {
+                match Self::validate_first_frame(response).await {
+                    Ok((response, prefetched)) => {
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                    outcome::SUCCESS, None, attempt_start,
+                            sink,
+                            attempt,
+                            ctx.id,
+                            endpoint_name,
+                            Some(status.as_u16()),
+                            outcome::SUCCESS,
+                            None,
+                            attempt_start,
                 );
                 self.token_manager
                     .report_success_for_request(ctx.id, model.as_deref());
@@ -929,8 +1030,48 @@ impl KiroProvider {
                 }
                 return Ok(KiroCallResult {
                     response,
+                            prefetched,
                     credential_id: ctx.id,
                 });
+            }
+                    Err(error) => {
+                        let semantic_error = error.downcast_ref::<FirstFrameUpstreamError>();
+                        let client_error = semantic_error.is_some_and(|upstream| {
+                            endpoint.is_client_validation_error(&upstream.body)
+                        });
+                        tracing::warn!(
+                            "API 响应在首个有效帧前失败（尝试 {}/{}）: {}",
+                            attempt + 1,
+                            max_retries,
+                            error
+                        );
+                        Self::emit_attempt(
+                            sink,
+                            attempt,
+                            ctx.id,
+                            endpoint_name,
+                            Some(status.as_u16()),
+                            if client_error {
+                                outcome::BAD_REQUEST
+                            } else {
+                                outcome::TRANSIENT
+                            },
+                            Some(&error.to_string()),
+                            attempt_start,
+                        );
+                        if client_error {
+                            return Err(error);
+                        }
+                        if semantic_error.is_some_and(FirstFrameUpstreamError::is_capacity_error) {
+                            capacity_failed_credentials.insert(ctx.id);
+                        }
+                        last_error = Some(error);
+                        if attempt + 1 < max_retries {
+                            sleep(Self::retry_delay(attempt)).await;
+                        }
+                        continue;
+                    }
+                }
             }
 
             // 失败响应：读取 body 用于日志/错误信息
@@ -946,8 +1087,14 @@ impl KiroProvider {
                     body
                 );
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                    outcome::QUOTA_EXHAUSTED, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(status.as_u16()),
+                    outcome::QUOTA_EXHAUSTED,
+                    Some(&body),
+                    attempt_start,
                 );
 
                 let has_available = self.token_manager.report_quota_exhausted_for_request(
@@ -976,8 +1123,14 @@ impl KiroProvider {
             // 400 Bad Request - 请求问题，重试/切换凭据无意义
             if status.as_u16() == 400 {
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(400),
-                    outcome::BAD_REQUEST, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(400),
+                    outcome::BAD_REQUEST,
+                    Some(&body),
+                    attempt_start,
                 );
                 if body.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD") {
                     return Err(UpstreamContextOverflowError.into());
@@ -1001,8 +1154,14 @@ impl KiroProvider {
                         body
                     );
                     Self::emit_attempt(
-                        sink, attempt, ctx.id, endpoint_name, Some(403),
-                        outcome::ACCOUNT_SUSPENDED, Some(&body), attempt_start,
+                        sink,
+                        attempt,
+                        ctx.id,
+                        endpoint_name,
+                        Some(403),
+                        outcome::ACCOUNT_SUSPENDED,
+                        Some(&body),
+                        attempt_start,
                     );
 
                     let has_available = self.token_manager.report_suspended_for_request(
@@ -1035,8 +1194,14 @@ impl KiroProvider {
                     body
                 );
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                    outcome::AUTH_FAILED, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(status.as_u16()),
+                    outcome::AUTH_FAILED,
+                    Some(&body),
+                    attempt_start,
                 );
 
                 // token 被上游失效：先尝试 force-refresh，每凭据仅一次机会
@@ -1093,17 +1258,21 @@ impl KiroProvider {
                     body
                 );
 
-                let remaining = self
-                    .token_manager
-                    .report_account_throttled_for_request(
+                let remaining = self.token_manager.report_account_throttled_for_request(
                         ctx.id,
                         cooldown,
                         model.as_deref(),
                         group,
                     );
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(429),
-                    outcome::ACCOUNT_THROTTLED, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(429),
+                    outcome::ACCOUNT_THROTTLED,
+                    Some(&body),
+                    attempt_start,
                 );
                 // 账号级风控通常不返回 Retry-After；此时使用本地实际冷却时间，
                 // 让下游网关在同一时段内也停止调度该虚拟账号。
@@ -1134,8 +1303,14 @@ impl KiroProvider {
                     body
                 );
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                    outcome::BAD_REQUEST, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(status.as_u16()),
+                    outcome::BAD_REQUEST,
+                    Some(&body),
+                    attempt_start,
                 );
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
@@ -1144,11 +1319,7 @@ impl KiroProvider {
             // 放大客户端等待时间和 Claude 端 Retrying 轮数；快速返回，让客户端下一次调用
             // 重新建连。
             if status.as_u16() == 524 || endpoint.is_gateway_timeout(&body) {
-                tracing::warn!(
-                    "API 请求失败（上游网关超时，不重试）: {} {}",
-                    status,
-                    body
-                );
+                tracing::warn!("API 请求失败（上游网关超时，不重试）: {} {}", status, body);
                 Self::emit_attempt(
                     sink,
                     attempt,
@@ -1173,8 +1344,14 @@ impl KiroProvider {
                     body
                 );
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                    outcome::TRANSIENT, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(status.as_u16()),
+                    outcome::TRANSIENT,
+                    Some(&body),
+                    attempt_start,
                 );
                 last_error = if let Some(rate_limit) = rate_limit_error {
                     if !rate_limit.should_retry_locally() {
@@ -1204,8 +1381,14 @@ impl KiroProvider {
             // 其他 4xx - 通常为请求/配置问题：直接返回，不计入凭据失败
             if status.is_client_error() {
                 Self::emit_attempt(
-                    sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                    outcome::BAD_REQUEST, Some(&body), attempt_start,
+                    sink,
+                    attempt,
+                    ctx.id,
+                    endpoint_name,
+                    Some(status.as_u16()),
+                    outcome::BAD_REQUEST,
+                    Some(&body),
+                    attempt_start,
                 );
                 anyhow::bail!("{} API 请求失败: {} {}", api_type, status, body);
             }
@@ -1219,8 +1402,14 @@ impl KiroProvider {
                 body
             );
             Self::emit_attempt(
-                sink, attempt, ctx.id, endpoint_name, Some(status.as_u16()),
-                outcome::UNKNOWN, Some(&body), attempt_start,
+                sink,
+                attempt,
+                ctx.id,
+                endpoint_name,
+                Some(status.as_u16()),
+                outcome::UNKNOWN,
+                Some(&body),
+                attempt_start,
             );
             last_error = Some(anyhow::anyhow!(
                 "{} API 请求失败: {} {}",
@@ -1292,6 +1481,54 @@ impl KiroProvider {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
         (model, session)
+    }
+
+    async fn validate_first_frame(
+        mut response: reqwest::Response,
+    ) -> anyhow::Result<(reqwest::Response, Bytes)> {
+        let mut prefetched = BytesMut::new();
+        let mut decoder = EventStreamDecoder::new();
+        timeout(FIRST_FRAME_TIMEOUT, async {
+            loop {
+                let chunk = response.chunk().await?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "上游在首个完整 EventStream 帧前结束（已接收 {} 字节）",
+                        prefetched.len()
+                    )
+                })?;
+                prefetched.extend_from_slice(&chunk);
+                decoder.feed(&chunk)?;
+                match decoder.decode() {
+                    Ok(Some(frame)) => {
+                        let message_type = frame.message_type().unwrap_or("event");
+                        let event_type = frame
+                            .event_type()
+                            .or_else(|| frame.headers.exception_type())
+                            .or_else(|| frame.headers.error_code())
+                            .unwrap_or("unknown");
+                        let lower_message_type = message_type.to_ascii_lowercase();
+                        let lower_event_type = event_type.to_ascii_lowercase();
+                        let is_error = matches!(lower_message_type.as_str(), "error" | "exception")
+                            || lower_event_type.contains("error")
+                            || lower_event_type.contains("exception");
+                        if is_error
+                            && !event_type.eq_ignore_ascii_case("ContentLengthExceededException")
+                        {
+                            return Err(anyhow::Error::new(FirstFrameUpstreamError {
+                                event_type: event_type.to_string(),
+                                body: frame.payload_as_str(),
+                            }));
+                        }
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                    Ok(None) => {}
+                    Err(error) => anyhow::bail!("首个 EventStream 帧无效: {error}"),
+                }
+            }
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("等待首个 EventStream 帧超时（45秒）"))??;
+        Ok((response, prefetched.freeze()))
     }
 
     fn retry_delay(attempt: usize) -> Duration {
@@ -1415,10 +1652,8 @@ mod rate_limit_tests {
 
     #[test]
     fn account_rate_limit_uses_cooldown_when_retry_after_is_missing() {
-        let (error, must_wait) = account_rate_limit_with_fallback(
-            Some(UpstreamRateLimitError::new(None)),
-            300,
-        );
+        let (error, must_wait) =
+            account_rate_limit_with_fallback(Some(UpstreamRateLimitError::new(None)), 300);
 
         assert_eq!(error.retry_after(), Some("300"));
         assert!(!must_wait, "无上游等待值时仍可按账号冷却策略故障转移");
@@ -1460,5 +1695,131 @@ mod rate_limit_tests {
     fn current_acquire_rate_limit_is_detected_before_outer_retry() {
         let error = anyhow::Error::new(UpstreamRateLimitError::new(Some("30".to_string())));
         assert!(is_rate_limit_error(&error));
+    }
+
+    async fn response_with_body(body: Vec<u8>) -> reqwest::Response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+            socket.flush().await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    fn event_stream_frame(headers: &[(&str, &str)], payload: &[u8]) -> Vec<u8> {
+        let mut encoded_headers = Vec::new();
+        for (name, value) in headers {
+            encoded_headers.push(name.len() as u8);
+            encoded_headers.extend_from_slice(name.as_bytes());
+            encoded_headers.push(7); // AWS EventStream string header
+            encoded_headers.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            encoded_headers.extend_from_slice(value.as_bytes());
+        }
+        let total_length = 16 + encoded_headers.len() + payload.len();
+        let mut frame = Vec::with_capacity(total_length);
+        frame.extend_from_slice(&(total_length as u32).to_be_bytes());
+        frame.extend_from_slice(&(encoded_headers.len() as u32).to_be_bytes());
+        let prelude_crc = crate::kiro::parser::crc::crc32(&frame);
+        frame.extend_from_slice(&prelude_crc.to_be_bytes());
+        frame.extend_from_slice(&encoded_headers);
+        frame.extend_from_slice(payload);
+        let message_crc = crate::kiro::parser::crc::crc32(&frame);
+        frame.extend_from_slice(&message_crc.to_be_bytes());
+        frame
+    }
+
+    fn minimal_event_stream_frame() -> Vec<u8> {
+        event_stream_frame(&[], &[])
+    }
+
+    #[tokio::test]
+    async fn first_frame_validation_rejects_empty_success_response() {
+        let response = response_with_body(Vec::new()).await;
+        let error = KiroProvider::validate_first_frame(response)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("首个完整 EventStream 帧前结束"));
+    }
+
+    #[tokio::test]
+    async fn first_frame_validation_rejects_truncated_frame() {
+        let mut frame = minimal_event_stream_frame();
+        frame.pop();
+        let response = response_with_body(frame).await;
+        let error = KiroProvider::validate_first_frame(response)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("首个完整 EventStream 帧前结束"));
+    }
+
+    #[tokio::test]
+    async fn first_frame_validation_rejects_capacity_exception_inside_http_200() {
+        let body = event_stream_frame(
+            &[
+                (":message-type", "exception"),
+                (":exception-type", "ServiceException"),
+            ],
+            br#"{"reason":"INSUFFICIENT_MODEL_CAPACITY","message":"try again"}"#,
+        );
+        let response = response_with_body(body).await;
+        let error = KiroProvider::validate_first_frame(response)
+            .await
+            .unwrap_err();
+        let upstream = error
+            .downcast_ref::<FirstFrameUpstreamError>()
+            .expect("capacity exception should remain typed");
+        assert_eq!(upstream.event_type, "ServiceException");
+        assert!(upstream.body.contains("INSUFFICIENT_MODEL_CAPACITY"));
+    }
+
+    #[tokio::test]
+    async fn first_frame_validation_accepts_content_length_completion() {
+        let body = event_stream_frame(
+            &[
+                (":message-type", "exception"),
+                (":exception-type", "ContentLengthExceededException"),
+            ],
+            br#"{"message":"output limit"}"#,
+        );
+        let response = response_with_body(body.clone()).await;
+        let (response, prefetched) = KiroProvider::validate_first_frame(response).await.unwrap();
+        let call = KiroCallResult {
+            response,
+            prefetched,
+            credential_id: 1,
+        };
+        assert_eq!(call.into_bytes().await.unwrap().as_ref(), body.as_slice());
+    }
+
+    #[tokio::test]
+    async fn first_frame_validation_preserves_prefetched_bytes() {
+        let mut body = minimal_event_stream_frame();
+        body.extend_from_slice(b"tail");
+        let response = response_with_body(body.clone()).await;
+        let (response, prefetched) = KiroProvider::validate_first_frame(response).await.unwrap();
+        let call = KiroCallResult {
+            response,
+            prefetched,
+            credential_id: 1,
+        };
+        assert_eq!(call.into_bytes().await.unwrap().as_ref(), body.as_slice());
     }
 }

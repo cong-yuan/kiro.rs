@@ -814,12 +814,33 @@ impl KiroCredentials {
     }
 
     /// 获取有效的 API Region（用于 API 请求）
-    /// 优先级：凭据.api_region > 凭据.region > config.api_region > config.region
+    /// 优先级：凭据.api_region > 凭据.region > 真实 profileArn 区域 > 全局 API Region
     pub fn effective_api_region<'a>(&'a self, config: &'a Config) -> &'a str {
         self.api_region
             .as_deref()
             .or(self.region.as_deref())
+            .or_else(|| self.profile_api_region())
             .unwrap_or(config.effective_api_region())
+    }
+
+    /// 从真实 CodeWhisperer profile ARN 提取数据面区域。
+    /// Builder ID 占位符不参与路由，避免把占位值误当作账号归属区域。
+    fn profile_api_region(&self) -> Option<&str> {
+        let arn = self.effective_profile_arn()?;
+        let mut parts = arn.splitn(6, ':');
+        match (
+            parts.next(),
+            parts.next(),
+            parts.next(),
+            parts.next(),
+        ) {
+            (Some("arn"), Some(_), Some("codewhisperer"), Some(region))
+                if !region.is_empty() =>
+            {
+                Some(region)
+            }
+            _ => None,
+        }
     }
 
     /// 获取有效的代理配置
@@ -1840,6 +1861,34 @@ mod tests {
         creds.api_region = Some("cred-api-region".to_string());
 
         assert_eq!(creds.effective_api_region(&config), "cred-api-region");
+    }
+
+    #[test]
+    fn test_effective_api_region_uses_real_profile_region_before_config() {
+        let mut config = Config::default();
+        config.region = "config-region".to_string();
+        config.api_region = Some("config-api-region".to_string());
+
+        let mut creds = KiroCredentials::default();
+        creds.profile_arn = Some(
+            "arn:aws:codewhisperer:eu-central-1:123456789012:profile/REAL".to_string(),
+        );
+
+        assert_eq!(creds.effective_api_region(&config), "eu-central-1");
+    }
+
+    #[test]
+    fn test_effective_api_region_explicit_override_wins_over_profile() {
+        let mut config = Config::default();
+        config.api_region = Some("config-api-region".to_string());
+
+        let mut creds = KiroCredentials::default();
+        creds.api_region = Some("explicit-region".to_string());
+        creds.profile_arn = Some(
+            "arn:aws:codewhisperer:eu-central-1:123456789012:profile/REAL".to_string(),
+        );
+
+        assert_eq!(creds.effective_api_region(&config), "explicit-region");
     }
 
     #[test]

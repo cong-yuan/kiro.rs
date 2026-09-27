@@ -35,6 +35,9 @@ pub struct KiroRequest {
     /// Profile ARN（可选）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_arn: Option<String>,
+    /// 标准推理参数；与 Kiro IDE / Go 实现的 wire 格式一致。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inference_config: Option<InferenceConfig>,
     /// Additional model request fields (a real Kiro CLI wire field carrying control switches such as `output_config.effort`)
     ///
     /// Real wire sample (captured from real Kiro CLI traffic):
@@ -48,6 +51,13 @@ pub struct KiroRequest {
     /// accept `xhigh`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub additional_model_request_fields: Option<AdditionalModelRequestFields>,
+}
+
+/// 上游输出生成参数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InferenceConfig {
+    pub max_tokens: i32,
 }
 
 /// Top-level container for the AWS Q CodeWhisperer `additionalModelRequestFields`
@@ -109,6 +119,14 @@ mod tests {
                 .content,
             "Test message"
         );
+    }
+
+    #[test]
+    fn test_inference_config_wire_format() {
+        let config = InferenceConfig { max_tokens: 32_000 };
+        let value = serde_json::to_value(&config).unwrap();
+        assert_eq!(value["maxTokens"], 32_000);
+        assert!(value.get("max_tokens").is_none());
     }
 
     #[test]
