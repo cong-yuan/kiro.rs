@@ -339,17 +339,18 @@ impl KiroProvider {
             .client_for(&ctx.credentials)?
             .post(&url)
             .body(body)
-            .header("content-type", endpoint.content_type())
-            .header("Connection", "close");
+            .header("content-type", endpoint.content_type());
         let response = endpoint.decorate_api(request, &rctx).send().await?;
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             anyhow::bail!("账号测试生成请求失败: {} {}", status, body);
         }
+        let (response, prefetched) = Self::validate_first_frame(response).await?;
 
         Ok(KiroCallResult {
             response,
+            prefetched,
             credential_id: ctx.id,
         })
     }

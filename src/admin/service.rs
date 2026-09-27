@@ -1311,13 +1311,14 @@ impl AdminService {
         let body = serde_json::to_string(&KiroRequest {
             conversation_state,
             profile_arn: None,
+            inference_config: Some(InferenceConfig { max_tokens: 64 }),
             additional_model_request_fields: None,
         })
         .map_err(|error| AdminServiceError::InternalError(error.to_string()))?;
         let generation_started = std::time::Instant::now();
         let generation = tokio::time::timeout(std::time::Duration::from_secs(90), async {
             let call = provider.call_api_for_credential(id, &body).await?;
-            let bytes = call.response.bytes().await?;
+            let bytes = call.into_bytes().await?;
             decode_account_test_reply(&bytes)
         })
         .await;
