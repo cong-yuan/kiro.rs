@@ -108,10 +108,10 @@ pub struct UserInputMessage {
 }
 
 impl UserInputMessage {
-    /// 创建新的用户输入消息
+    /// 创建新的用户输入消息（currentMessage：始终携带 envState）
     pub fn new(content: impl Into<String>, model_id: impl Into<String>) -> Self {
         Self {
-            user_input_message_context: UserInputMessageContext::default(),
+            user_input_message_context: UserInputMessageContext::for_current(),
             content: content.into(),
             model_id: model_id.into(),
             images: Vec::new(),
@@ -160,12 +160,15 @@ impl Default for EnvState {
 
 /// 用户输入消息上下文
 ///
-/// 包含工具定义和工具执行结果
+/// 包含工具定义和工具执行结果。
+/// `envState` 仅应出现在 `currentMessage`；官方 kiro-cli 的 history tool 结果
+/// 只有 `toolResults`，不带 `envState`（否则会把代理进程 cwd 写进历史前缀）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputMessageContext {
-    /// 环境状态（kiro-cli 始终携带）
-    pub env_state: EnvState,
+    /// 环境状态（仅 currentMessage；history 必须为 None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_state: Option<EnvState>,
     /// 工具执行结果列表
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_results: Vec<ToolResult>,
@@ -176,8 +179,9 @@ pub struct UserInputMessageContext {
 
 impl Default for UserInputMessageContext {
     fn default() -> Self {
+        // 默认不含 envState，避免 history 路径误带入
         Self {
-            env_state: EnvState::default(),
+            env_state: None,
             tool_results: Vec::new(),
             tools: Vec::new(),
         }
@@ -185,13 +189,31 @@ impl Default for UserInputMessageContext {
 }
 
 fn is_empty_context(ctx: &UserInputMessageContext) -> bool {
-    ctx.tools.is_empty() && ctx.tool_results.is_empty()
+    ctx.env_state.is_none() && ctx.tools.is_empty() && ctx.tool_results.is_empty()
 }
 
 impl UserInputMessageContext {
-    /// 创建新的消息上下文
+    /// 创建新的消息上下文（无 envState，用于 history）
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// currentMessage 上下文：带上 envState
+    pub fn for_current() -> Self {
+        Self {
+            env_state: Some(EnvState::default()),
+            tool_results: Vec::new(),
+            tools: Vec::new(),
+        }
+    }
+
+    /// history 中的 tool 结果上下文：仅 toolResults
+    pub fn for_history_tool_results(results: Vec<ToolResult>) -> Self {
+        Self {
+            env_state: None,
+            tool_results: results,
+            tools: Vec::new(),
+        }
     }
 
     /// 设置工具列表
@@ -271,8 +293,9 @@ impl HistoryUserMessage {
 pub struct UserMessage {
     /// 消息内容
     pub content: String,
-    /// 模型 ID
-    pub model_id: String,
+    /// 模型 ID（官方 kiro-cli 的 history 不发送此字段）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
     /// 消息来源
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
@@ -285,11 +308,11 @@ pub struct UserMessage {
 }
 
 impl UserMessage {
-    /// 创建新的用户消息
-    pub fn new(content: impl Into<String>, model_id: impl Into<String>) -> Self {
+    /// 创建新的历史用户消息（不带 modelId / envState，对齐官方 kiro-cli）
+    pub fn new(content: impl Into<String>, _model_id: impl Into<String>) -> Self {
         Self {
             content: content.into(),
-            model_id: model_id.into(),
+            model_id: None,
             origin: Some("AI_EDITOR".to_string()),
             images: Vec::new(),
             user_input_message_context: UserInputMessageContext::default(),

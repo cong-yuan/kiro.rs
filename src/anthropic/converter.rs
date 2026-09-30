@@ -854,8 +854,8 @@ pub(crate) fn convert_request_with_purpose(
         }
     }
 
-    // 11. 构建 UserInputMessageContext
-    let mut context = UserInputMessageContext::new();
+    // 11. 构建 UserInputMessageContext（currentMessage 必须带 envState）
+    let mut context = UserInputMessageContext::for_current();
     if !tools.is_empty() {
         context = context.with_tools(tools);
     }
@@ -1894,9 +1894,10 @@ fn merge_user_messages(
     }
 
     if !all_tool_results.is_empty() {
-        let mut ctx = UserInputMessageContext::new();
-        ctx = ctx.with_tool_results(all_tool_results);
-        user_msg = user_msg.with_context(ctx);
+        // history 只带 toolResults，不带 envState（对齐官方 kiro-cli）
+        user_msg = user_msg.with_context(UserInputMessageContext::for_history_tool_results(
+            all_tool_results,
+        ));
     }
 
     Ok(HistoryUserMessage {

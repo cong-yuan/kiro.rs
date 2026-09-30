@@ -11,7 +11,7 @@
 use reqwest::RequestBuilder;
 use uuid::Uuid;
 
-use super::{KiroEndpoint, RequestContext};
+use super::{inject_profile_arn, KiroEndpoint, RequestContext};
 
 pub const CLI_ENDPOINT_NAME: &str = "cli";
 
@@ -81,6 +81,7 @@ impl KiroEndpoint for CliEndpoint {
             .header("host", self.host(ctx))
             .header("amz-sdk-invocation-id", Uuid::new_v4().to_string())
             .header("amz-sdk-request", "attempt=1; max=3")
+            .header("x-kiro-attempt", "1;max=3")
             .header("Authorization", format!("Bearer {}", ctx.token));
 
         if let Some(token_type) = ctx.credentials.token_type_header() {
@@ -107,8 +108,9 @@ impl KiroEndpoint for CliEndpoint {
         req
     }
 
-    fn transform_api_body(&self, body: &str, _ctx: &RequestContext<'_>) -> String {
-        set_origin_kiro_cli(body)
+    fn transform_api_body(&self, body: &str, ctx: &RequestContext<'_>) -> String {
+        let body = normalize_kiro_cli_body(body);
+        inject_profile_arn(&body, ctx.credentials.streaming_profile_arn().as_deref())
     }
 }
 
@@ -116,14 +118,18 @@ impl KiroEndpoint for CliEndpoint {
 /// 1. 所有 "AI_EDITOR" origin 替换为 "KIRO_CLI"
 /// 2. 移除 conversationState.agentContinuationId（Kiro CLI 不发送此字段）
 /// 3. 移除 history 中用户消息的 modelId（Kiro CLI 不在历史消息里发送此字段）
-fn set_origin_kiro_cli(body: &str) -> String {
+/// 4. 移除 history 中 userInputMessageContext.envState（官方仅 current 带 envState）
+fn normalize_kiro_cli_body(body: &str) -> String {
     let body = body.replace("\"origin\":\"AI_EDITOR\"", "\"origin\":\"KIRO_CLI\"");
 
     let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&body) else {
         return body;
     };
 
-    if let Some(state) = json.get_mut("conversationState").and_then(|v| v.as_object_mut()) {
+    if let Some(state) = json
+        .get_mut("conversationState")
+        .and_then(|v| v.as_object_mut())
+    {
         state.remove("agentContinuationId");
 
         if let Some(history) = state.get_mut("history").and_then(|v| v.as_array_mut()) {
@@ -133,6 +139,12 @@ fn set_origin_kiro_cli(body: &str) -> String {
                     .and_then(|v| v.as_object_mut())
                 {
                     user_input.remove("modelId");
+                    if let Some(ctx) = user_input
+                        .get_mut("userInputMessageContext")
+                        .and_then(|v| v.as_object_mut())
+                    {
+                        ctx.remove("envState");
+                    }
                 }
             }
         }
@@ -148,7 +160,7 @@ mod tests {
     #[test]
     fn test_set_origin_kiro_cli_current_message() {
         let body = r#"{"conversationState":{"currentMessage":{"userInputMessage":{"content":"hi","origin":"AI_EDITOR"}}}}"#;
-        let result = set_origin_kiro_cli(body);
+        let result = normalize_kiro_cli_body(body);
         assert!(result.contains("\"origin\":\"KIRO_CLI\""));
         assert!(!result.contains("\"origin\":\"AI_EDITOR\""));
     }
@@ -156,7 +168,7 @@ mod tests {
     #[test]
     fn test_set_origin_kiro_cli_history() {
         let body = r#"{"conversationState":{"history":[{"userInputMessage":{"content":"hi","origin":"AI_EDITOR"}},{"userInputMessage":{"content":"hello","origin":"AI_EDITOR"}}],"currentMessage":{"userInputMessage":{"origin":"AI_EDITOR"}}}}"#;
-        let result = set_origin_kiro_cli(body);
+        let result = normalize_kiro_cli_body(body);
         assert!(!result.contains("\"origin\":\"AI_EDITOR\""));
         assert_eq!(result.matches("\"origin\":\"KIRO_CLI\"").count(), 3);
     }
@@ -164,6 +176,70 @@ mod tests {
     #[test]
     fn test_set_origin_kiro_cli_no_origin() {
         let body = r#"{"conversationState":{}}"#;
-        assert_eq!(set_origin_kiro_cli(body), r#"{"conversationState":{}}"#);
+        assert_eq!(normalize_kiro_cli_body(body), r#"{"conversationState":{}}"#);
+    }
+
+    #[test]
+    fn test_normalize_strips_history_model_id_env_and_agent_continuation() {
+        let body = serde_json::json!({
+            "conversationState": {
+                "agentContinuationId": "x",
+                "history": [{
+                    "userInputMessage": {
+                        "content": "hi",
+                        "modelId": "m",
+                        "origin": "AI_EDITOR",
+                        "userInputMessageContext": {
+                            "envState": {
+                                "operatingSystem": "macos",
+                                "currentWorkingDirectory": "/tmp"
+                            },
+                            "toolResults": [{
+                                "toolUseId": "t1",
+                                "content": [{"text": "ok"}],
+                                "status": "success"
+                            }]
+                        }
+                    }
+                }],
+                "currentMessage": {
+                    "userInputMessage": {
+                        "origin": "AI_EDITOR",
+                        "modelId": "m",
+                        "userInputMessageContext": {
+                            "envState": {
+                                "operatingSystem": "macos",
+                                "currentWorkingDirectory": "/cwd"
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        let result = normalize_kiro_cli_body(&body.to_string());
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let state = &v["conversationState"];
+        assert!(state.get("agentContinuationId").is_none());
+        let hist_user = &state["history"][0]["userInputMessage"];
+        assert!(hist_user.get("modelId").is_none());
+        assert_eq!(hist_user["origin"], "KIRO_CLI");
+        assert!(
+            hist_user["userInputMessageContext"]
+                .get("envState")
+                .is_none(),
+            "history must not carry envState"
+        );
+        assert!(
+            hist_user["userInputMessageContext"]
+                .get("toolResults")
+                .is_some()
+        );
+        // current still keeps modelId + envState
+        assert_eq!(state["currentMessage"]["userInputMessage"]["modelId"], "m");
+        assert!(
+            state["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+                .get("envState")
+                .is_some()
+        );
     }
 }

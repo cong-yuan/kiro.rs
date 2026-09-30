@@ -108,26 +108,13 @@ impl KiroEndpoint for IdeEndpoint {
     }
 
     fn transform_api_body(&self, body: &str, ctx: &RequestContext<'_>) -> String {
-        inject_profile_arn(body, ctx.credentials.streaming_profile_arn().as_deref())
+        super::inject_profile_arn(body, ctx.credentials.streaming_profile_arn().as_deref())
     }
-}
-
-/// 将 profile_arn 注入到请求体 JSON 根对象
-fn inject_profile_arn(request_body: &str, profile_arn: Option<&str>) -> String {
-    if let Some(arn) = profile_arn {
-        if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(request_body) {
-            json["profileArn"] = serde_json::Value::String(arn.to_string());
-            if let Ok(body) = serde_json::to_string(&json) {
-                return body;
-            }
-        }
-    }
-    request_body.to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::inject_profile_arn;
+    use super::super::inject_profile_arn;
     use serde_json::Value;
 
     #[test]

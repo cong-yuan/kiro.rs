@@ -17,6 +17,19 @@ pub mod ide;
 pub use cli::CliEndpoint;
 pub use ide::IdeEndpoint;
 
+/// 将 profileArn 注入到请求体 JSON 根对象（CLI / IDE 共用）
+pub(crate) fn inject_profile_arn(request_body: &str, profile_arn: Option<&str>) -> String {
+    if let Some(arn) = profile_arn {
+        if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(request_body) {
+            json["profileArn"] = serde_json::Value::String(arn.to_string());
+            if let Ok(body) = serde_json::to_string(&json) {
+                return body;
+            }
+        }
+    }
+    request_body.to_string()
+}
+
 /// Kiro 端点
 ///
 /// 同一个 `KiroProvider` 可持有多个 endpoint 实现，按凭据级字段切换。
