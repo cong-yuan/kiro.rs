@@ -54,7 +54,8 @@ use super::openai::{
     resolve_session_metadata,
 };
 use super::types::{
-    Message, MessagesRequest, Metadata, OutputConfig, SystemMessage, Thinking, Tool,
+    CacheControl, Message, MessagesRequest, Metadata, OutputConfig, SystemMessage, Thinking,
+    Tool,
 };
 
 #[path = "responses_compaction.rs"]
@@ -463,8 +464,12 @@ fn responses_to_anthropic(
             tool_choice,
             thinking,
             output_config,
+            // 同 /v1/chat/completions：OpenAI 缓存是隐式的，有稳定会话时开启顶层自动缓存。
+            cache_control: metadata.as_ref().map(|_| CacheControl {
+                cache_type: "ephemeral".to_string(),
+                ttl: None,
+            }),
             metadata,
-            cache_control: None,
         },
         tool_kinds,
     ))
@@ -2228,6 +2233,7 @@ mod tests {
         .unwrap();
         let metadata = resolve_session_metadata(req.prompt_cache_key.as_deref(), &HeaderMap::new());
         let (anthropic, _) = responses_to_anthropic(req, metadata).unwrap();
+        assert!(anthropic.cache_control.is_some(), "session should enable auto cache");
 
         assert_eq!(
             anthropic

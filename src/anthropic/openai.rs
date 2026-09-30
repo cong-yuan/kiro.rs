@@ -281,8 +281,14 @@ fn openai_to_anthropic(
         tool_choice,
         thinking: None,
         output_config,
+        // OpenAI 的 prompt caching 是隐式的：客户端不会发送 cache_control。
+        // 仅在已解析出稳定会话标识时开启顶层自动缓存（5m），让 CacheMeter
+        // 能按前缀计量；无会话时保持 None，避免不同用户共享主 Key 时串会话。
+        cache_control: metadata.as_ref().map(|_| super::types::CacheControl {
+            cache_type: "ephemeral".to_string(),
+            ttl: None,
+        }),
         metadata,
-        cache_control: None,
     })
 }
 
@@ -816,6 +822,28 @@ mod tests {
 
         assert!(resolve_session_metadata(Some("invalid"), &headers).is_none());
         assert!(resolve_session_metadata(None, &HeaderMap::new()).is_none());
+    }
+
+    #[test]
+    fn chat_conversion_enables_auto_cache_only_with_session() {
+        let req: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "claude-sonnet-4.5",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let without = openai_to_anthropic(req, None).unwrap();
+        assert!(without.cache_control.is_none());
+
+        let req: ChatCompletionRequest = serde_json::from_value(serde_json::json!({
+            "model": "claude-sonnet-4.5",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        let metadata = resolve_session_metadata(Some(UUID_A), &HeaderMap::new());
+        let with = openai_to_anthropic(req, metadata).unwrap();
+        let cc = with.cache_control.expect("session should enable auto cache");
+        assert_eq!(cc.cache_type, "ephemeral");
+        assert!(cc.ttl.is_none());
     }
 
     #[test]
