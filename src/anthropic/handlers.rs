@@ -481,6 +481,14 @@ fn resolve_non_stream_usage(
 ) -> (i32, i32, i32, i32) {
     if let Some(usage) = provider_usage {
         let usage = usage.sanitized();
+        // Kiro 的 metadataEvent.tokenUsage 目前不下发 cache 明细（两项恒为 0）。
+        // 本地 CacheMeter 有有效覆盖时，保留 provider 的精确总输入与输出，
+        // 只用本地计量把总输入拆成 input / cache_write / cache_read。
+        if !usage.has_cache_breakdown() && cache_usage.has_coverage() {
+            let (input, cache_write, cache_read) =
+                cache_usage.split_against_total(usage.total_input_tokens());
+            return (input, usage.output_tokens, cache_write, cache_read);
+        }
         return (
             usage.uncached_input_tokens,
             usage.output_tokens,
@@ -2698,6 +2706,32 @@ mod tests {
         assert_eq!(
             resolve_non_stream_usage(100, Some(80), 9, fallback_cache, Some(provider)),
             (3, 11, 4, 7)
+        );
+    }
+
+    #[test]
+    fn non_stream_usage_splits_provider_total_when_cache_fields_missing() {
+        let cache_usage = super::super::cache_metering::CacheUsage {
+            cache_read: 25,
+            cache_covered_est: 50,
+            prompt_total_est: 100,
+        };
+        let provider = TokenUsage {
+            uncached_input_tokens: 80,
+            output_tokens: 11,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+        };
+
+        // 总输入取 provider 精确值 80，输出取 provider 的 11，而非本地估算 9。
+        assert_eq!(
+            resolve_non_stream_usage(100, Some(70), 9, cache_usage, Some(provider)),
+            (40, 11, 20, 20)
+        );
+        // 本地无覆盖时保持 provider 原值。
+        assert_eq!(
+            resolve_non_stream_usage(100, Some(70), 9, Default::default(), Some(provider)),
+            (80, 11, 0, 0)
         );
     }
 

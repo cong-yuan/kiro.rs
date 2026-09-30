@@ -39,7 +39,12 @@ impl TokenUsage {
         }
     }
 
-    #[cfg(test)]
+    /// 上游是否提供了 cache 明细。Kiro 当前不下发这两个字段，反序列化后均为 0。
+    pub fn has_cache_breakdown(self) -> bool {
+        let usage = self.sanitized();
+        usage.cache_read_input_tokens > 0 || usage.cache_write_input_tokens > 0
+    }
+
     /// OpenAI 口径的总输入 token（缓存读取是其中的子集）。
     pub fn total_input_tokens(self) -> i32 {
         let usage = self.sanitized();

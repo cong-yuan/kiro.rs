@@ -85,6 +85,11 @@ pub struct CacheUsage {
 }
 
 impl CacheUsage {
+    /// 本地计量是否得到了可用于分摊的缓存覆盖。
+    pub fn has_coverage(&self) -> bool {
+        self.cache_covered_est > 0 && self.prompt_total_est > 0
+    }
+
     /// 按真实 total 口径把 prompt 拆成三个互斥的部分，返回
     /// `(input_tokens, cache_creation, cache_read)`，相加严格 == `total_real`。
     ///

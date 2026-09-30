@@ -1455,6 +1455,13 @@ impl StreamContext {
     pub fn resolved_usage(&self) -> (i32, i32, i32) {
         if let Some(usage) = self.provider_token_usage {
             let usage = usage.sanitized();
+            // 与非流式一致：provider 不下发 cache 明细时，用本地 CacheMeter
+            // 拆分 provider 的精确总输入。
+            if !usage.has_cache_breakdown() && self.cache_usage.has_coverage() {
+                return self
+                    .cache_usage
+                    .split_against_total(usage.total_input_tokens());
+            }
             return (
                 usage.uncached_input_tokens,
                 usage.cache_write_input_tokens,
@@ -5454,6 +5461,35 @@ mod tests {
         }));
         assert_eq!(ctx.resolved_usage(), (0, 24, 23));
         assert_eq!(ctx.resolved_output_tokens(), 22);
+    }
+
+    #[test]
+    fn stream_usage_splits_provider_total_when_cache_fields_missing() {
+        use crate::anthropic::cache_metering::CacheUsage;
+
+        let mut ctx = StreamContext::new_with_thinking(
+            "claude-opus-4-7",
+            100,
+            false,
+            HashMap::new(),
+            test_known_tools(),
+        );
+        ctx.context_input_tokens = Some(70);
+        ctx.output_tokens = 9;
+        ctx.cache_usage = CacheUsage {
+            cache_read: 25,
+            cache_covered_est: 50,
+            prompt_total_est: 100,
+        };
+        ctx.provider_token_usage = Some(TokenUsage {
+            uncached_input_tokens: 80,
+            output_tokens: 11,
+            cache_read_input_tokens: 0,
+            cache_write_input_tokens: 0,
+        });
+
+        assert_eq!(ctx.resolved_usage(), (40, 20, 20));
+        assert_eq!(ctx.resolved_output_tokens(), 11);
     }
 
     #[test]
