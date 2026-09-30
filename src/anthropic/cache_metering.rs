@@ -1117,9 +1117,13 @@ fn extract_session_id(user_id: &str) -> Option<String> {
         return Some(sid.to_string());
     }
 
+    // Claude Code: `user_<hash>_account__session_<uuid>`；
+    // OpenAI 兼容入口（resolve_session_metadata）规范化后的形态：`session_<uuid>`。
     user_id
         .split_once("_session_")
-        .map(|(_, sid)| sid.trim().to_string())
+        .map(|(_, sid)| sid)
+        .or_else(|| user_id.strip_prefix("session_"))
+        .map(|sid| sid.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
@@ -2889,6 +2893,68 @@ mod tests {
         img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)
             .unwrap();
         B64.encode(&buf)
+    }
+
+    #[test]
+    fn extract_session_id_accepts_openai_normalized_session() {
+        // resolve_session_metadata 产出的形态；此前被忽略导致 OpenAI 入口永不计量缓存。
+        assert_eq!(
+            extract_session_id("session_550e8400-e29b-41d4-a716-446655440000"),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
+        );
+        assert_eq!(extract_session_id("session_"), None);
+        assert_eq!(extract_session_id("user_abc"), None);
+    }
+
+    #[tokio::test]
+    async fn openai_session_metadata_meters_cache_across_turns() {
+        use crate::anthropic::types::{Message, Metadata, SystemMessage};
+
+        let cache = CacheMeter::new(None);
+        let make = |turn: usize| {
+            let mut messages = Vec::new();
+            for k in 1..turn {
+                messages.push(Message {
+                    role: "user".to_string(),
+                    content: serde_json::json!(format!("turn {k}")),
+                });
+                messages.push(Message {
+                    role: "assistant".to_string(),
+                    content: serde_json::json!("ok"),
+                });
+            }
+            messages.push(Message {
+                role: "user".to_string(),
+                content: serde_json::json!(format!("turn {turn}")),
+            });
+            MessagesRequest {
+                model: "claude-sonnet-4.5".to_string(),
+                max_tokens: 16,
+                messages,
+                stream: false,
+                system: Some(vec![SystemMessage {
+                    text: "Rule: be concise. ".repeat(300),
+                    cache_control: None,
+                }]),
+                tools: None,
+                tool_choice: None,
+                thinking: None,
+                output_config: None,
+                metadata: Some(Metadata {
+                    user_id: Some("session_550e8400-e29b-41d4-a716-446655440000".to_string()),
+                }),
+                cache_control: Some(CacheControl {
+                    cache_type: "ephemeral".to_string(),
+                    ttl: None,
+                }),
+            }
+        };
+        // 主 Key（key_id=0）+ 会话标识：必须能计量。
+        let first = compute_cache_usage(&cache, &make(1), 0).await;
+        assert!(first.cache_covered_est > 0, "first turn should write cache");
+        assert_eq!(first.cache_read, 0);
+        let second = compute_cache_usage(&cache, &make(2), 0).await;
+        assert!(second.cache_read > 0, "second turn should read the prior prefix");
     }
 
     #[test]
